@@ -1192,20 +1192,28 @@ def plan_ok(plan: MetaPlan, args) -> bool:
                   + (f" (--force: overwriting the location of {over})" if over else ""))
         else:
             print("  Every file to upload has a location; --place is not needed here.")
-    if args.force or not (plan.have_date or plan.have_place):
+    from_folder = [r for r, src in plan.named.items() if src.startswith("folder")]
+    if args.force or not (plan.have_date or plan.have_place or from_folder):
         return True
-    warn = []
-    if plan.have_date:
-        warn.append(f"{len(plan.have_date)} of {files(len(plan.cands))} already {'has' if len(plan.have_date) == 1 else 'have'} a date")
-        show("has a date:", [f"{m.rel}  ({m.meta.when or m.meta.date})" for m in plan.have_date])
-    if plan.have_place:
-        warn.append(f"{len(plan.have_place)} of {files(len(plan.cands))} already {'has' if len(plan.have_place) == 1 else 'have'} a location")
-        show("has a location:", [m.rel for m in plan.have_place])
+    warn, asks = [], []
+    if from_folder:
+        warn.append(f"{files(len(from_folder))} dated from the folder name only")
+        show("from folder:", [f"{r}  -> {plan.dates[r]:%Y-%m-%d %H:%M:%S}  ({plan.named[r]})" for r in from_folder])
+        asks.append("use these folder dates")
+    if plan.have_date or plan.have_place:
+        if plan.have_date:
+            warn.append(f"{len(plan.have_date)} of {files(len(plan.cands))} already "
+                        f"{'has' if len(plan.have_date) == 1 else 'have'} a date")
+            show("has a date:", [f"{m.rel}  ({m.meta.when or m.meta.date})" for m in plan.have_date])
+        if plan.have_place:
+            warn.append(f"{len(plan.have_place)} of {files(len(plan.cands))} already "
+                        f"{'has' if len(plan.have_place) == 1 else 'have'} a location")
+            show("has a location:", [m.rel for m in plan.have_place])
+        asks.append("set --date/--place only on the others")
     if args.dry_run:
-        print(f"  ! {'; '.join(warn)}. Without --dry-run this asks first (--force: does not ask, "
-              "overwrites them too).")
+        print(f"  ! {'; '.join(warn)}. Without --dry-run this asks first (--force: does not ask).")
         return True
-    return confirm(f"{'; '.join(warn)}. Set the date/place only on the others?")
+    return confirm(f"{'; '.join(warn)}. Upload, and {' and '.join(asks)}?")
 
 
 def confirm(question: str) -> bool:
@@ -1599,6 +1607,8 @@ def list_files(folder: Path, args, log: Log, api: Immich | None, media_ext, side
                    f"{len(plan.undated)} without a date, {len(plan.nogps)} without a location"
         if plan.stop:
             summary += "; the upload stops here (use --date, or --allow-undated)"
+        elif not args.force and any(v.startswith("folder") for v in plan.named.values()):
+            summary += "; asks first, as some dates come from a folder name"
         elif (plan.have_date or plan.have_place) and not args.force:
             summary += "; asks first, as some have a date/place and others not"
     print(summary)

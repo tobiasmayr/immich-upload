@@ -85,7 +85,9 @@ immich-upload.py --date 1998-08 --place "Rome, Italy" "Scans/Rome 1998"
      its subfolders. This only happens if no file in it has an EXIF date outside that
      day, month, year or range (give or take a day). The files get noon of the first
      day, one second apart. A file whose own name has a date inside the folder's period
-     gets that date instead, as it is more precise.
+     gets that date instead, as it is more precise. Since a folder name is only a rough
+     date, the script lists these files and asks before uploading (`--force`: no
+     question).
   2. **File name.** The files no folder dated get the date in their file name:
      `IMG_20190714_153012`, `PXL_20190714_153012345`, `IMG-20190714-WA0001` (WhatsApp,
      date only: noon, one second apart), `2019-07-14 15.30.12`, ... This only happens if
