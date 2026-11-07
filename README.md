@@ -111,6 +111,10 @@ The rules:
 - **Only files without a date or place get one.** If some of the files have one and
   others don't, the script lists them and asks first, then sets it only on the others.
   Without a terminal to ask in, the answer is no.
+- **A date that matches `--date` is no conflict.** A file whose own date is the
+  `--date` value or a more precise form of it keeps its date, and doesn't count for the
+  question: with `--date 2019-07`, a photo taken 2019-07-14 15:30 keeps that date, even
+  with `--force`. One from 2019-08, or a plain 2019, does not match.
 - **`--force` is a re-upload.** It also redoes folders logged as verified, and
   `--date`/`--place` then apply to every file in the folder, including those already
   in Immich, overwriting what they have, without asking.

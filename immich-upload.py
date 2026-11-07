@@ -1008,6 +1008,7 @@ class MetaPlan:
     stop: bool  # files without a date and neither --date nor --allow-undated
     named: dict[str, str] = field(default_factory=dict)  # rel -> where --date-from-name found its date
     notes: list[str] = field(default_factory=list)  # why --date-from-name did not use a name
+    agree: list[MediaFile] = field(default_factory=list)  # their own date is --date or more precise: kept
 
 
 # Dates in names, for --date-from-name: "IMG_20190714_153012", "IMG-20190714-WA0001", "2019-07-14 15.30.12",
@@ -1132,6 +1133,13 @@ def dates_from_names(root: Path, media: list[MediaFile], wanted: list[MediaFile]
     return {r: d.astimezone() for r, d in dates.items()}, src, notes
 
 
+def agrees(when: str | None, args) -> bool:
+    """A date ("YYYY-MM-DD[ HH:MM:SS...]") that is --date or a more precise form of it: --date 2019-07
+    agrees with 2019-07-14 15:30, but not with 2019-08-01 nor with a plain 2019 (less precise)."""
+    want = args.date.strftime("%Y-%m-%d %H:%M:%S")[: args.date_prec]
+    return bool(when) and len(when) >= args.date_prec and when[: args.date_prec] == want
+
+
 def meta_plan(cands: list[MediaFile], args, root: Path, media: list[MediaFile]) -> MetaPlan:
     """What the run will do about dates and places. `cands` are the files that count (the ones to upload,
     with --force all); `media` are all files of the folder, which --date-from-name checks against."""
@@ -1142,16 +1150,23 @@ def meta_plan(cands: list[MediaFile], args, root: Path, media: list[MediaFile]) 
         named_dates, named, notes = dates_from_names(root, media, [m for m in cands if not m.meta.date])
     undated = [m for m in cands if not m.meta.date and m.rel not in named_dates]
     nogps = [m for m in cands if not m.meta.gps]
-    set_date = (cands if args.force else undated) if args.date else []
+
+    def when(m):  # the file's own date, as precise as it is known
+        if m.rel in named_dates:
+            return f"{named_dates[m.rel]:%Y-%m-%d %H:%M:%S}"
+        return (m.meta.when or m.meta.date or "")[:19] if m.meta.date else None
+
+    agree = [m for m in cands if args.date and when(m) and agrees(when(m), args)]  # these keep their date
+    set_date = ([m for m in cands if m not in agree] if args.force else undated) if args.date else []
     dates = {}  # one second apart in file name order, so scans keep their order in the timeline
     for m in sorted(set_date, key=lambda m: m.rel.lower()):
         dates.setdefault(m.rel, args.date + dt.timedelta(seconds=len(dates)))
     dates.update(named_dates)
     places = {m.rel for m in (cands if args.force else nogps)} if args.place else set()
-    have_date = [m for m in cands if m.meta.date or m.rel in named_dates] if args.date and undated else []
+    have_date = [m for m in cands if when(m) and m not in agree] if args.date and undated else []
     have_place = [m for m in cands if m.meta.gps] if args.place and nogps else []
     stop = bool(undated) and not args.date and not args.allow_undated
-    return MetaPlan(cands, undated, nogps, have_date, have_place, dates, places, stop, named, notes)
+    return MetaPlan(cands, undated, nogps, have_date, have_place, dates, places, stop, named, notes, agree)
 
 
 def plan_ok(plan: MetaPlan, args) -> bool:
@@ -1176,6 +1191,10 @@ def plan_ok(plan: MetaPlan, args) -> bool:
     if plan.stop:
         return True
     will = "Would set" if args.dry_run else "Will set"
+    if args.date and plan.agree:
+        print(f"  {files(len(plan.agree))} already {'has' if len(plan.agree) == 1 else 'have'} a date matching "
+              f"--date {args.date.strftime('%Y-%m-%d %H:%M:%S')[:args.date_prec]} and "
+              f"{'keeps' if len(plan.agree) == 1 else 'keep'} it")
     if args.date:
         fill = [r for r in plan.dates if r not in plan.named]
         if fill:
@@ -1294,20 +1313,23 @@ def set_date_place(api: Immich, args, plan: MetaPlan, done: list[MediaFile], pro
     return not errors
 
 
-def parse_date(text: str) -> dt.datetime:
-    """YYYY, YYYY-MM, YYYY-MM-DD, optionally with a time (HH:MM[:SS]) and a UTC offset."""
+def parse_date(text: str) -> tuple[dt.datetime, int]:
+    """YYYY, YYYY-MM, YYYY-MM-DD, optionally with a time (HH:MM[:SS]) and a UTC offset.
+    Returns the date and how much of it was given: 4 (year), 7 (month), 10 (day), 16 (minute) or
+    19 (second) characters of "YYYY-MM-DD HH:MM:SS"."""
     t = text.strip().replace("Z", "+00:00")
+    prec = 19 if re.match(r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}", t) else 16
     if re.fullmatch(r"\d{4}", t):
-        t += "-01-01"
+        t, prec = t + "-01-01", 4
     elif re.fullmatch(r"\d{4}-\d{2}", t):
-        t += "-01"
+        t, prec = t + "-01", 7
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", t):
-        t += " 12:00"  # noon, so no time zone can move it to another day
+        t, prec = t + " 12:00", min(prec, 10)  # noon, so no time zone can move it to another day
     try:
         d = dt.datetime.fromisoformat(t)
     except ValueError:
         raise argparse.ArgumentTypeError(f"not a date: {text!r} (use e.g. 2019-07-14 or \"2019-07-14 15:30\")")
-    return d if d.tzinfo else d.astimezone()  # no offset given: this computer's time zone
+    return (d if d.tzinfo else d.astimezone()), prec  # no offset given: this computer's time zone
 
 
 def parse_place(text: str) -> tuple[float, float, str]:
@@ -1464,6 +1486,7 @@ def main() -> int:
     ap.add_argument("--server", default=os.environ.get("IMMICH_URL"), help="Immich URL (or IMMICH_URL)")
     ap.add_argument("--api-key", default=os.environ.get("IMMICH_API_KEY"), help="API key (or IMMICH_API_KEY)")
     args = ap.parse_args()
+    args.date, args.date_prec = args.date or (None, 0)
 
     if args.list_files:
         folders = check_folders(ap, args)
@@ -1569,6 +1592,8 @@ def list_files(folder: Path, args, log: Log, api: Immich | None, media_ext, side
             out.append(f"date from {plan.named[m.rel]} {plan.dates[m.rel]:%Y-%m-%d %H:%M:%S}")
         elif m.rel in plan.dates:
             out.append(f"{'overwrite' if m.meta.date else 'set'} date {plan.dates[m.rel]:%Y-%m-%d %H:%M:%S}")
+        elif m in plan.agree:
+            out.append("keeps its date (matches --date)")
         elif not m.meta.date:
             out.append("no date")
         if m.rel in plan.places:
