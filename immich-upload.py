@@ -1064,13 +1064,13 @@ def near(day: str, a: dt.date, b: dt.date) -> bool:
     return a - DAY <= d <= b + DAY
 
 
-def dates_from_names(root: Path, media: list[MediaFile], wanted: list[MediaFile]):
+def dates_from_names(root: Path, media: list[MediaFile], wanted: list[MediaFile], cands: list[MediaFile]):
     """--date-from-name for the files in `wanted` (those without a date).
 
     1. A folder with a date in its name dates the undated files in it (and its subfolders), if no file
        in it has an EXIF date outside that day, month, year or range. A file whose own name has a date
        inside that period gets the date from its name instead, as it is more precise.
-    2. The files no folder dated get the date in their file name, if every one of them has a date in
+    2. The files no folder dated get the date in their file name, if every one of them not yet in Immich has a date in
        its name or EXIF, and no EXIF date contradicts the name.
     Returns {rel: date}, {rel: where it came from} and notes on why names were not used."""
     dates, src, notes = {}, {}, []
@@ -1111,7 +1111,8 @@ def dates_from_names(root: Path, media: list[MediaFile], wanted: list[MediaFile]
     rest = [m for m in media if m.rel not in covered]
     if any(m.rel in want for m in rest):
         named = {m.rel: name_dates(m.path.name) for m in rest}
-        missing = [m for m in rest if not m.meta.date and not named[m.rel]]
+        counted = {m.rel for m in cands}  # files already in Immich need no date
+        missing = [m for m in rest if m.rel in counted and not m.meta.date and not named[m.rel]]
         contra = [m for m in rest if m.meta.date and named[m.rel]
                   and not near(m.meta.date, named[m.rel][0][0].date(), named[m.rel][0][0].date())]
         if missing:
@@ -1147,7 +1148,7 @@ def meta_plan(cands: list[MediaFile], args, root: Path, media: list[MediaFile]) 
     read_all(media if from_name else cands, args.jobs)
     named_dates, named, notes = ({}, {}, [])
     if from_name:
-        named_dates, named, notes = dates_from_names(root, media, [m for m in cands if not m.meta.date])
+        named_dates, named, notes = dates_from_names(root, media, [m for m in cands if not m.meta.date], cands)
     undated = [m for m in cands if not m.meta.date and m.rel not in named_dates]
     nogps = [m for m in cands if not m.meta.gps]
 
@@ -1317,7 +1318,9 @@ def parse_date(text: str) -> tuple[dt.datetime, int]:
     """YYYY, YYYY-MM, YYYY-MM-DD, optionally with a time (HH:MM[:SS]) and a UTC offset.
     Returns the date and how much of it was given: 4 (year), 7 (month), 10 (day), 16 (minute) or
     19 (second) characters of "YYYY-MM-DD HH:MM:SS"."""
-    t = text.strip().replace("Z", "+00:00")
+    t = text.strip()
+    m = re.fullmatch(r"(.*?)\s*(Z|[+-]\d{2}:\d{2})", t)  # an offset also works after a plain date
+    t, offset = (m.group(1), m.group(2).replace("Z", "+00:00")) if m else (t, "")
     prec = 19 if re.match(r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}", t) else 16
     if re.fullmatch(r"\d{4}", t):
         t, prec = t + "-01-01", 4
@@ -1326,7 +1329,9 @@ def parse_date(text: str) -> tuple[dt.datetime, int]:
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", t):
         t, prec = t + " 12:00", min(prec, 10)  # noon, so no time zone can move it to another day
     try:
-        d = dt.datetime.fromisoformat(t)
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?", t):
+            raise ValueError
+        d = dt.datetime.fromisoformat(t + offset)
     except ValueError:
         raise argparse.ArgumentTypeError(f"not a date: {text!r} (use e.g. 2019-07-14 or \"2019-07-14 15:30\")")
     return (d if d.tzinfo else d.astimezone()), prec  # no offset given: this computer's time zone
@@ -1397,7 +1402,7 @@ def list_albums(api: Immich) -> int:
         return 0
 
     def dates(a):
-        start, end = (a.get(k, "")[:10] for k in ("startDate", "endDate"))
+        start, end = ((a.get(k) or "")[:10] for k in ("startDate", "endDate"))  # empty albums have none
         if not start:
             return ""
         return start if start == end else f"{start} to {end}"
