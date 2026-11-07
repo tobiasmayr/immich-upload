@@ -82,3 +82,16 @@ def test_warns_about_readable_key_file(run, server_only, tmp_path):
 def test_list_files_works_without_key(run, no_server, tmp_path):
     write(tmp_path / "f" / "a.jpg", media.jpeg(media.tiff("2019:07:14 15:30:00")))
     assert run("-L", tmp_path / "f")[0] == 0
+
+
+def test_missing_url_is_reported_on_its_own(run, monkeypatch, tmp_path):
+    monkeypatch.delenv("IMMICH_URL", raising=False)
+    monkeypatch.setenv("IMMICH_API_KEY", API_KEY)
+    rc, _ = run("--list-albums")
+    assert rc == 2 and "no Immich URL" in run.err and "API key" not in run.err
+
+
+def test_missing_key_is_reported_on_its_own(run, server_only, own_config_dir):
+    rc, _ = run("--list-albums")
+    assert rc == 2 and "no API key" in run.err and "URL" not in run.err
+    assert str(own_config_dir / "immich-upload" / "api-key") in run.err

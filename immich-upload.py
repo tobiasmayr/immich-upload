@@ -1564,9 +1564,10 @@ def main() -> int:
         for f in folders:
             list_files(f, args, log, api, media_ext, sidecar_ext)
         return 0
-    if not args.server or not args.api_key:
-        ap.error("set the Immich URL (IMMICH_URL or --server) and the API key (a key file, see --api-key-file, "
-                 "or IMMICH_API_KEY)")
+    if not args.server:
+        ap.error("no Immich URL: set IMMICH_URL or use --server")
+    if not args.api_key:
+        ap.error(f"no API key: save it in {default_key_file()}, or use --api-key-file or IMMICH_API_KEY")
     if args.list_albums or args.list_tags:
         api = Immich(args.server, args.api_key)
         rc = list_albums(api) if args.list_albums else 0
