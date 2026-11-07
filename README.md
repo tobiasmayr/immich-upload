@@ -165,3 +165,15 @@ real Documents folder, on Linux the XDG documents folder. Set `--log` or
 | 1 | a folder had a problem, stopped for missing dates, or was not confirmed |
 | 2 | setup problem: server not reachable, key refused |
 | 130 | interrupted with Ctrl-C |
+
+## Tests
+
+The tests use [pytest](https://pytest.org) and need no Immich server: they generate tiny
+photo and video files with exactly the metadata each test needs, and run the script
+against a fake Immich API in the same process (`test/fake_immich.py`).
+
+```sh
+python3 -m venv .venv
+.venv/bin/pip install pytest
+.venv/bin/pytest test
+```
