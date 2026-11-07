@@ -25,6 +25,7 @@ class FakeImmich:
         self.albums: dict[str, dict] = {}  # id -> {name, ids}
         self.tags: dict[str, dict] = {}  # value -> {id, name, value, parentId, assets}
         self.fail_names: set[str] = set()  # uploads of these file names answer 500
+        self.refuse_restore = False  # restoring from the trash answers 403, as without asset.delete
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self.url = f"http://127.0.0.1:{self.server.server_port}"
         self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
@@ -111,6 +112,14 @@ class FakeImmich:
                         res.append({"id": item["id"], "action": "reject", "reason": "duplicate", "assetId": a["id"],
                                     "isTrashed": a["trashed"]} if a else {"id": item["id"], "action": "accept"})
                     return self.send(200, {"results": res})
+                if self.path == "/api/trash/restore/assets":
+                    if fake.refuse_restore:
+                        return self.send(403, {"message": "Missing required permission: asset.delete"})
+                    ids = set(json.loads(b)["ids"])
+                    for a in fake.assets.values():
+                        if a["id"] in ids:
+                            a["trashed"] = False
+                    return self.send(200, {"count": len(ids)})
                 if self.path == "/api/albums":
                     i = str(uuid.uuid4())
                     fake.albums[i] = {"name": json.loads(b)["albumName"], "ids": set()}

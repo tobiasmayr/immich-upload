@@ -52,7 +52,8 @@ Settings come from the command line or these environment variables:
   IMMICH_API_KEY       permissions: asset.upload, asset.read, album.read,
                        album.create, albumAsset.create; for --tag also
                        tag.read, tag.create, tag.asset; for --date or
-                       --place also asset.update
+                       --place also asset.update; for --restore-trashed
+                       also asset.delete
   IMMICH_API_KEY_FILE  a file holding the key instead (see --api-key-file)
   IMMICH_UPLOAD_LOG    path of the Markdown log (optional)
 
@@ -583,6 +584,7 @@ class MediaFile:
     sha1: str = ""
     asset_id: str | None = None
     state: str = "pending"  # new | existing | failed
+    trashed: bool = False  # Immich has it, but in the trash
     error: str = ""
     meta: Meta = field(default_factory=Meta)
 
@@ -889,7 +891,10 @@ def process(folder: Path, args, api: Immich, media_ext, sidecar_ext, log: Log) -
     by_id = {str(i): m for i, m in enumerate(s.media)}
     todo = [m for m in s.media if m.state == "pending"]
     existing = [m for m in s.media if m.state == "existing"]
-    print(f"  {len(existing)} already in Immich, {len(todo)} to upload")
+    trashed = [m for m in s.media if m.trashed]
+    print(f"  {len(existing)} already in Immich, {len(todo)} to upload"
+          + (f"; {len(trashed)} of the files in Immich {'is' if len(trashed) == 1 else 'are'} in the trash"
+             + (", will restore" if args.restore_trashed else " (--restore-trashed to restore)") if trashed else ""))
 
     # 3. dates and places. Files already in Immich keep theirs, unless --force (a re-upload) is given.
     cands = [m for m in s.media if m.state != "failed"] if args.force else todo
@@ -907,6 +912,7 @@ def process(folder: Path, args, api: Immich, media_ext, sidecar_ext, log: Log) -
                    now=dt.datetime.now().strftime("%Y-%m-%d %H:%M"))
         print(f"  Logged to {args.log}")
         return False
+    restore_from_trash(api, [m for m in s.media if m.trashed and m.state == "existing"])
 
     # 3. upload
     def up(m: MediaFile):
@@ -942,7 +948,7 @@ def process(folder: Path, args, api: Immich, media_ext, sidecar_ext, log: Log) -
         elif m.asset_id and res.get("assetId") != m.asset_id:
             m.state, m.error = "failed", f"checksum belongs to another asset ({res.get('assetId')})"
         elif res.get("isTrashed"):
-            m.state, m.error = "failed", "in Immich, but in the trash (restore it there first)"
+            m.state, m.error = "failed", "in the trash: restore it in Immich, or use --restore-trashed"
         else:
             m.asset_id = res.get("assetId") or m.asset_id
             ok_ids.append(m.asset_id)
@@ -1026,9 +1032,28 @@ def in_immich(media: list[MediaFile], args, api: Immich) -> None:
     for cid, res in api.check([(cid, m.sha1) for cid, m in by_id.items()]).items():
         m = by_id[cid]
         if res["action"] == "reject" and res.get("reason") == "duplicate":
-            m.state, m.asset_id = "existing", res.get("assetId")
+            m.state, m.asset_id, m.trashed = "existing", res.get("assetId"), bool(res.get("isTrashed"))
+            if m.trashed and not args.restore_trashed:
+                m.state, m.error = "failed", "in the trash: restore it in Immich, or use --restore-trashed"
         elif res["action"] == "reject":
             m.state, m.error = "failed", f"rejected by Immich: {res.get('reason')}"
+
+
+def restore_from_trash(api: Immich, media: list[MediaFile]) -> None:
+    """--restore-trashed: take these files' copies in Immich out of the trash."""
+    ids = list(dict.fromkeys(m.asset_id for m in media))
+    if not ids:
+        return
+    try:
+        for i in range(0, len(ids), BATCH):
+            api.request("POST", "/trash/restore/assets", {"ids": ids[i : i + BATCH]})
+        print(f"  Restored {files(len(ids))} from the trash")
+    except ApiError as e:
+        for m in media:
+            m.state, m.error = "failed", f"could not restore it from the trash ({e}; the key needs asset.delete)"
+        return
+    for m in media:
+        m.trashed = False
 
 
 def read_all(media: list[MediaFile], jobs: int) -> None:
@@ -1512,6 +1537,9 @@ def main() -> int:
                          "if no file in that folder has an EXIF date outside it; else from the file name "
                          "(IMG_20190714_153012, IMG-20190714-WA0001), if every file has a date in its name or "
                          "EXIF and none contradicts its name. --date covers what is left")
+    ap.add_argument("--restore-trashed", action="store_true",
+                    help="restore files whose copy in Immich is in the trash (else they count as failed); "
+                         "the API key needs asset.delete")
     ap.add_argument("--allow-undated", action="store_true",
                     help="upload files without a date anyway (Immich then uses the file time)")
     ap.add_argument("--delete", action="store_true",
@@ -1621,9 +1649,13 @@ def preview(folder: Path, args, log: Log, api: Immich | None, media_ext, sidecar
             return "skip (verified)"
         if m.state == "failed":
             return m.error
-        out = ["in Immich" if m.state == "existing" else "upload"]
+        if m.state == "existing":
+            out = ["in Immich" + (", restore from the trash" if m.trashed else "")
+                   + ", add to album" + (" and tags" if args.tag else "")]
+        else:
+            out = ["upload"]
         if m not in plan.cands:
-            return "in Immich, left as is"
+            return out[0]
         if plan.stop:
             return "NO DATE: stops the folder" if not m.meta.date else "ok, but the folder stops"
         if m.rel in plan.named:
@@ -1682,7 +1714,12 @@ def preview(folder: Path, args, log: Log, api: Immich | None, media_ext, sidecar
     failed = [m for m in s.media if m.state == "failed"]
     todo = sum(m.state == "pending" for m in s.media)
     line += (f"; {existing} already in Immich, {todo} to upload" if api else f"; {todo} to upload")
-    print(line + (f", {len(failed)} rejected" if failed else ""))
+    restore = sum(m.trashed and m.state == "existing" for m in s.media)
+    in_trash = sum(m.trashed and m.state == "failed" for m in s.media)
+    rejected = len(failed) - in_trash
+    print(line + (f", {restore} of them to restore from the trash" if restore else "")
+          + (f", {in_trash} in the trash (--restore-trashed would restore {'it' if in_trash == 1 else 'them'})"
+             if in_trash else "") + (f", {rejected} rejected" if rejected else ""))
     counted = "of them" if not args.force else "with --force, of all"
 
     if plan.stop:
@@ -1719,7 +1756,7 @@ def preview(folder: Path, args, log: Log, api: Immich | None, media_ext, sidecar
 
     if args.delete:
         if plan.stop or failed:
-            print("  --delete: nothing, as the upload would not go through")
+            print("  --delete: nothing, as not every file would check out")
         else:
             n = len(s.other)
             kept = f"the folder stays ({n} other {'file' if n == 1 else 'files'} in it)" if n else "then the folder"

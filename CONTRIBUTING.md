@@ -52,6 +52,7 @@ Endpoints used (v3; the URL gets `/api` appended if missing):
 | `PUT /assets/{id}` `{dateTimeOriginal}` | `--date`, one asset at a time |
 | `PUT /assets` `{ids, latitude, longitude}` | `--place`, in bulk |
 | `GET /assets/{id}` | reading date and place back |
+| `POST /trash/restore/assets` `{ids}` | `--restore-trashed` |
 
 Immich keeps date/place edits in its database and writes them to an `.xmp` next to its
 own copy of the file. The original keeps its checksum.

@@ -25,6 +25,7 @@ Create the API key in Immich under **Account Settings → API Keys** with these 
 
 - `asset.read`
 - `asset.update` (only for `--date`/`--place`)
+- `asset.delete` (only for `--restore-trashed`)
 - `asset.upload`
 - `album.create`
 - `album.read`
@@ -63,7 +64,7 @@ set, it also checks the key and which files Immich has; without one, it works of
   File       Size   Taken                          Date from              Location                Camera  Plan
   ---------  -----  -----------------------------  ---------------------  ----------------------  ------  --------------------------------------------------
   dated.jpg   87 B  2019-07-14 15:30:00            EXIF DateTimeOriginal  -> 64.14660, -21.94260  -       upload, keeps its date (matches --date), set place
-  gps.jpg    201 B  2019-07-15 03:04:05            EXIF DateTimeOriginal  64.14660, -21.94260     -       in Immich, left as is
+  gps.jpg    201 B  2019-07-15 03:04:05            EXIF DateTimeOriginal  64.14660, -21.94260     -       in Immich, add to album and tags
   scan.jpg    13 B  -> 2019-07-01 12:00:00 +02:00  --date                 -> 64.14660, -21.94260  -       upload, set date, set place
   3 files (301 B), taken 2019-07-14 15:30 to 2019-07-15 03:04; 1 already in Immich, 2 to upload
   Dates, of them: 1 get --date; 1 keep a date matching --date
@@ -81,6 +82,7 @@ set, it also checks the key and which files Immich has; without one, it works of
 | `--date-from-name` | take missing dates from folder or file names (see below) |
 | `--place PLACE` | place for files without GPS: `"41.9, 12.5"` or a name, looked up on OpenStreetMap |
 | `--allow-undated` | upload files without a date anyway |
+| `--restore-trashed` | restore files whose copy in Immich is in the trash (else they count as failed) |
 | `--delete` | delete uploaded files, sidecars and junk once all is verified; other files stay |
 | `-n` (or `-L`) | dry run: list the files and what would happen; changes nothing |
 | `-f` | force: redo a verified folder as a re-upload (see below) |
@@ -90,7 +92,8 @@ set, it also checks the key and which files Immich has; without one, it works of
 `immich-upload.py -h` shows all options.
 
 A run is safe to repeat or interrupt. A folder logged as verified is skipped, unless
-its number of files changed.
+its number of files changed. Files Immich already has are not sent again, but are added
+to the album and tagged.
 
 ## Dates and places
 

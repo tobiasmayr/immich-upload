@@ -59,10 +59,58 @@ def test_files_in_immich_are_not_sent_again(run, immich, folder):
 
 def test_trashed_file_fails(run, immich, folder):
     p = photo(folder, "a.jpg", "2019:07:14 15:30:00")
+    photo(folder, "b.jpg", "2019:07:14 15:31:00")
     immich.add(p.read_bytes(), "a.jpg", trashed=True)
-    rc, out = run(folder, "--delete")
-    assert rc == 1 and "in the trash" in out
+    rc, out = run("--delete", folder)
+    assert rc == 1 and "a.jpg: in the trash: restore it in Immich, or use --restore-trashed" in out
     assert p.exists()  # not deleted: it did not check out
+    assert immich.by_name("a.jpg")["trashed"]
+    assert immich.album("Iceland")["ids"] == {immich.by_name("b.jpg")["id"]}  # the others still go in
+
+
+def test_restore_trashed(run, immich, folder):
+    p = photo(folder, "a.jpg", "2019:07:14 15:30:00")
+    immich.add(p.read_bytes(), "a.jpg", trashed=True)
+    rc, out = run("--restore-trashed", "--delete", folder)
+    assert rc == 0 and "Restored 1 file from the trash" in out
+    assert not immich.by_name("a.jpg")["trashed"]
+    assert immich.album("Iceland")["ids"] == {immich.by_name("a.jpg")["id"]}
+    assert not folder.exists()
+
+
+def test_restore_trashed_without_permission(run, immich, folder):
+    p = photo(folder, "a.jpg", "2019:07:14 15:30:00")
+    immich.add(p.read_bytes(), "a.jpg", trashed=True)
+    immich.refuse_restore = True
+    rc, out = run("--restore-trashed", "--delete", folder)
+    assert rc == 1 and "could not restore it from the trash" in out and "asset.delete" in out
+    assert p.exists()
+
+
+def test_restore_waits_for_the_question(run, immich, folder):
+    p = photo(folder, "a.jpg", "2015:05:05 05:05:05")
+    immich.add(p.read_bytes(), "a.jpg", trashed=True)
+    photo(folder, "b.jpg", "2015:05:05 05:06:00")
+    photo(folder, "scan.jpg")
+    rc, _ = run("--restore-trashed", "--date", "1998", folder, answer=False)
+    assert rc == 1 and immich.by_name("a.jpg")["trashed"]  # said no: nothing changed
+
+
+def test_dry_run_shows_trash_and_album(run, immich, folder):
+    t = photo(folder, "trashed.jpg", "2019:07:14 15:30:00")
+    e = photo(folder, "elsewhere.jpg", "2019:07:14 15:30:00")
+    immich.add(t.read_bytes(), "trashed.jpg", trashed=True)
+    immich.add(e.read_bytes(), "elsewhere.jpg")
+    rc, out = run("-n", "-t", "T", "--delete", folder)
+    assert rc == 1
+    assert "in the trash: restore it in Immich, or use --restore-trashed" in out
+    assert "in Immich, add to album and tags" in out
+    assert "1 in the trash (--restore-trashed would restore it)" in out
+    assert "--delete: nothing, as not every file would check out" in out
+    rc, out = run("-n", "--restore-trashed", folder)
+    assert rc == 0 and "in Immich, restore from the trash, add to album" in out
+    assert "1 of them to restore from the trash" in out
+    assert immich.by_name("trashed.jpg")["trashed"]  # a dry run restores nothing
 
 
 def test_dry_run_uploads_nothing(run, immich, folder):
@@ -259,7 +307,7 @@ def test_list_files_with_server(run, immich, folder):
     immich.add(p.read_bytes(), "old.jpg")
     photo(folder, "IMG_20200102_153012.jpg")
     rc, out = run("-L", "--date-from-name", folder)
-    assert rc == 0 and "in Immich, left as is" in out
+    assert rc == 0 and "in Immich, add to album" in out
     row = next(l for l in out.splitlines() if "IMG_20200102_153012.jpg" in l)
     assert "-> 2020-01-02 15:30:12" in row and "file name" in row and "upload, date from file name" in row
     assert not immich.album("Iceland")  # changes nothing
