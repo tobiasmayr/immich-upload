@@ -1,134 +1,41 @@
 # immich-upload
 
-Upload folders of photos and videos to [Immich](https://immich.app), check that every
-file arrived, and keep a log of which folders are done. Made for moving a photo
-collection over bit by bit, with the option to delete each folder once it is safely in
-Immich.
+Move photo folders to [Immich](https://immich.app) bit by bit, safely:
 
-One Python file, standard library only (Python 3.9+). Works on Linux and Windows.
-Written for the Immich v3 API (v3.3.6).
+- uploads a folder with its subfolders and `.xmp` sidecars, skipping what Immich already has
+- checks afterwards that every file is in Immich under its exact checksum
+- stops before uploading files without a capture date, which Immich would date by the
+  file time, and can fill in dates and places for them
+- logs each folder and can delete it once everything is verified
 
-## Setup
+One Python file, standard library only (Python 3.9+), Linux and Windows. Written for the
+Immich v3 API.
 
-Create an API key in Immich under **Account Settings → API Keys** with these permissions:
-
-| For | Permissions |
-| --- | --- |
-| Uploading | `asset.upload`, `asset.read`, `album.read`, `album.create`, `albumAsset.create` |
-| `--tag` | `tag.read`, `tag.create`, `tag.asset` |
-| `--date`, `--place` | `asset.update` |
-
-Then set the server and key, or pass them as `--server` and `--api-key`:
+## Quick start
 
 ```sh
-export IMMICH_URL=https://photos.example.org
+export IMMICH_URL=https://photos.example.org   # Windows: setx IMMICH_URL ..., then a new terminal
 export IMMICH_API_KEY=...
+
+immich-upload.py -L FOLDER            # look first: each file's date, place and what would happen
+immich-upload.py FOLDER               # upload into an album named after the folder
+immich-upload.py --delete FOLDER      # ... and delete the folder once all is verified
 ```
 
-On Windows: `setx IMMICH_URL https://photos.example.org` and `setx IMMICH_API_KEY ...`,
-then open a new terminal.
+Create the API key in Immich under **Account Settings → API Keys** with these permissions:
 
-## Usage
+- `asset.read`
+- `asset.update` (only for `--date`/`--place`)
+- `asset.upload`
+- `album.create`
+- `album.read`
+- `albumAsset.create`
+- `tag.create` (only for `--tag`)
+- `tag.read` (only for `--tag`)
+- `tag.asset` (only for `--tag`)
 
-```sh
-immich-upload.py FOLDER...                    # upload, album named after each folder
-immich-upload.py -a "Iceland 2019" FOLDER     # choose the album
-immich-upload.py -t Travel/Iceland FOLDER     # tag every file (nested tags with "/")
-immich-upload.py --delete FOLDER              # delete the folder once all is verified
-immich-upload.py -n FOLDER                    # dry run: show what would happen
-immich-upload.py -L FOLDER                    # list the files, their dates and the plan
-immich-upload.py --list-albums --list-tags    # what is in Immich
-```
-
-`immich-upload.py -h` lists all options.
-
-## What a run does
-
-For each folder:
-
-1. **Find the files.** All photos and videos in the folder and its subfolders, using the
-   file types the server accepts. An `.xmp` sidecar (`IMG_1.jpg.xmp` or `IMG_1.xmp`) is
-   sent along with its photo.
-2. **Skip what Immich has.** Every file is checksummed (SHA-1). Files Immich already has
-   are not sent again.
-3. **Check dates.** Each file to upload is checked for a capture date, using the same
-   tags Immich reads. EXIF "ModifyDate" does not count. If a file has none, the folder
-   stops before anything is uploaded, because Immich would date it by the file time.
-   See [Dates and places](#dates-and-places).
-4. **Upload and verify.** After uploading, every checksum must be in Immich, belong to
-   the right asset, and not be in the trash.
-5. **Album and tags.** All files go into the album: `--album`, else the album the log
-   already has for the folder, else the folder's name. `--tag` tags are created if
-   missing.
-6. **Log.** The folder gets one row in the log, which is updated on every run.
-7. **Delete (with `--delete`).** Only runs when everything checked out. It deletes the
-   uploaded files, their sidecars and system junk (`Thumbs.db`, `desktop.ini`, ...),
-   then the folder if it is empty. Other files are kept and listed.
-
-A run is safe to repeat or interrupt. Files that made it are not sent again.
-
-## Dates and places
-
-Scans and photos from messengers often have no capture date or GPS position. For those:
-
-```sh
-immich-upload.py --date 1998-08 --place "Rome, Italy" "Scans/Rome 1998"
-```
-
-- **`--date`** takes `1998`, `1998-08`, `1998-08-14` or `"1998-08-14 15:30"`, optionally
-  with a UTC offset. Without a time it uses 12:00; without an offset, this computer's
-  time zone. The files get times one second apart in file name order, so scans keep
-  their order in the timeline.
-- **`--date-from-name`** finds the date in names instead, in two steps:
-  1. **Folder name.** A folder named like `2019-07-14 Iceland`, `2019-07 Iceland`,
-     `Rome 1998` or `2005-03-04 - 2005-03-06 Paris` dates the undated files in it and
-     its subfolders. This only happens if no file in it has an EXIF date outside that
-     day, month, year or range (give or take a day). The files get noon of the first
-     day, one second apart. A file whose own name has a date inside the folder's period
-     gets that date instead, as it is more precise. Since a folder name is only a rough
-     date, the script lists these files and asks before uploading (`--force`: no
-     question).
-  2. **File name.** The files no folder dated get the date in their file name:
-     `IMG_20190714_153012`, `PXL_20190714_153012345`, `IMG-20190714-WA0001` (WhatsApp,
-     date only: noon, one second apart), `2019-07-14 15.30.12`, ... This only happens if
-     every one of those files has a date in its name or EXIF, and no EXIF date
-     contradicts its name.
-
-  Times in names are taken as this computer's time zone. What a name can't date,
-  `--date` covers, if given. The output says which step was used, or why not.
-- **`--place`** takes coordinates (`"41.9, 12.5"`) or a place name, which is looked up
-  on OpenStreetMap (only the name is sent). The match is printed so you can check it.
-- Both are set **in Immich**, after the upload, and then read back. The files
-  themselves are never changed. Immich stores the edit in its database and in an
-  `.xmp` next to its own copy, and fills in the city and the timeline position itself.
-  The local files keep their checksums, so a later run still recognises them as
-  uploaded.
-
-The rules:
-
-- **Only files not yet in Immich are affected.** Files Immich already has are not
-  checked for a date and keep their date and place.
-- **Only files without a date or place get one.** If some of the files have one and
-  others don't, the script lists them and asks first, then sets it only on the others.
-  Without a terminal to ask in, the answer is no.
-- **A date that matches `--date` is no conflict.** A file whose own date is the
-  `--date` value or a more precise form of it keeps its date, and doesn't count for the
-  question: with `--date 2019-07`, a photo taken 2019-07-14 15:30 keeps that date, even
-  with `--force`. One from 2019-08, or a plain 2019, does not match.
-- **`--force` is a re-upload.** It also redoes folders logged as verified, and
-  `--date`/`--place` then apply to every file in the folder, including those already
-  in Immich, overwriting what they have, without asking.
-- **`--allow-undated`** uploads undated files anyway.
-
-Files the date reader cannot look into (GIF, AVI, MKV, BMP, ...) count as undated.
-The reader handles JPEG, PNG, WebP, TIFF, HEIC/AVIF, MP4/MOV, the common raw formats
-(DNG, CR2, CR3, NEF, ARW, RAF, RW2, ...) and XMP.
-
-## Checking a folder first
-
-`-L` / `--list-files` changes nothing. It lists every file with its date as stored, the
-tag the date came from, its GPS position and camera, and what a run with the same
-options would do:
+`-L` shows what a run with the same options would do (with a server set, it also checks
+which files Immich has):
 
 ```
 File          Size   Taken                Date from              Location             Camera  Plan
@@ -138,39 +45,68 @@ gps.jpg       511 B  2018-01-02 03:04:05  EXIF DateTimeOriginal  64.14660, -21.9
 zerodate.jpg  397 B  -                    -                      -                    -       upload, set date 1990-01-01 12:00:00, set place
 ```
 
-With a server set, it also checks which files Immich already has. That means reading
-and checksumming every file. Without a server it only reads the files locally.
+## Options
 
-## The log
+| Option | |
+| --- | --- |
+| `-a ALBUM` | album name (default: the one in the log, else the folder's name) |
+| `-t TAG` | tag every file; repeatable; nested with `/`, e.g. `Travel/Iceland` |
+| `--date DATE` | date for files without one: `1998`, `1998-08`, `1998-08-14`, `"1998-08-14 15:30"` |
+| `--date-from-name` | take missing dates from folder or file names (see below) |
+| `--place PLACE` | place for files without GPS: `"41.9, 12.5"` or a name, looked up on OpenStreetMap |
+| `--allow-undated` | upload files without a date anyway |
+| `--delete` | delete uploaded files, sidecars and junk once all is verified; other files stay |
+| `-n` | dry run |
+| `-f` | force: redo a verified folder as a re-upload (see below) |
+| `-L`, `--list-albums`, `--list-tags` | list local files, albums or tags; changes nothing |
 
-By default the log is `Documents/immich-uploads.md` in your user folder: on Windows the
-real Documents folder, on Linux the XDG documents folder. Set `--log` or
-`IMMICH_UPLOAD_LOG` to use another file. It is a Markdown table with one row per folder:
+`immich-upload.py -h` shows all options.
+
+A run is safe to repeat or interrupt. A folder logged as verified is skipped, unless
+its number of files changed.
+
+## Dates and places
+
+`--date` and `--place` are set in Immich after the upload; the files are never changed,
+so they keep matching by checksum. They apply only to files that are not in Immich yet
+and lack a date or place:
+
+- **Mixed folders ask first.** If some files have a date and others not, the script lists
+  them and asks. A date that is the `--date` value or more precise doesn't count:
+  `--date 2019-07` leaves a photo from 2019-07-14 alone without asking.
+- **Times.** Without a time, `--date` means 12:00 (this computer's time zone). Files are
+  set one second apart in file name order, so scans keep their order.
+- **`--force`** applies them to every file, also those already in Immich, overwriting
+  their places and any dates that don't match, without asking.
+
+`--date-from-name` tries two steps; the output says which one dated a file, or why not:
+
+1. **Folder name** (`2019-07-14 Iceland`, `2019-07 Iceland`, `Rome 1998`,
+   `2005-03-04 - 2005-03-06 Paris`): dates the undated files in it, if no file in it has
+   an EXIF date outside that period. A file name with a date inside the period wins. As
+   a folder name is only a rough date, the script asks first.
+2. **File name** (`IMG_20190714_153012`, `PXL_…`, `IMG-20190714-WA0001`,
+   `2019-07-14 15.30.12`): only if every remaining file has a date in its name or EXIF,
+   and no EXIF date contradicts its name.
+
+`--date` covers what's left. Without a terminal to ask in, the answer is no.
+
+The date reader looks at the same tags Immich does (EXIF ModifyDate doesn't count) in
+JPEG, PNG, WebP, TIFF, HEIC, MP4/MOV, common raw formats and XMP. Other types, such as
+GIF or AVI, count as undated.
+
+## Log
+
+`Documents/immich-uploads.md` (or `--log FILE`, `IMMICH_UPLOAD_LOG`), one row per folder:
 
 | Folder | Album | Tags | Files | Uploaded | Status | Deleted | First run | Last run |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `D:\Photos\2019 Iceland` | 2019 Iceland | Travel/Iceland | 412 | 412 | verified | yes | 2026-11-07 15:02 | 2026-11-07 15:02 |
 
-- **Uploaded** adds up the files this script sent over all runs.
-- **Status** is `verified`, `N failed`, `album incomplete`, `tags not set`,
-  `date/place not set` or `stopped: N without date`.
-- A `verified` folder is skipped next time, unless its number of files changed or
-  `--force` is given.
+Exit codes: 0 all verified, 1 a folder failed, stopped or wasn't confirmed, 2 server or
+key problem, 130 interrupted.
 
-## Exit codes
+## Contributing and license
 
-| Code | Meaning |
-| --- | --- |
-| 0 | every folder checked out |
-| 1 | a folder had a problem, stopped for missing dates, or was not confirmed |
-| 2 | setup problem: server not reachable, key refused |
-| 130 | interrupted with Ctrl-C |
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for how the script is built and how to run the tests.
-
-## License
-
-Copyright (C) 2026 Tobias Mayr. Licensed under the GNU General Public License,
-version 3 or (at your option) any later version. See [LICENSE](LICENSE).
+See [CONTRIBUTING.md](CONTRIBUTING.md). Copyright (C) 2026 Tobias Mayr, licensed under
+the [GPL v3 or later](LICENSE).
