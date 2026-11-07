@@ -79,6 +79,21 @@ immich-upload.py --date 1998-08 --place "Rome, Italy" "Scans/Rome 1998"
   with a UTC offset. Without a time it uses 12:00; without an offset, this computer's
   time zone. The files get times one second apart in file name order, so scans keep
   their order in the timeline.
+- **`--date-from-name`** finds the date in names instead, in two steps:
+  1. **Folder name.** A folder named like `2019-07-14 Iceland`, `2019-07 Iceland`,
+     `Rome 1998` or `2005-03-04 - 2005-03-06 Paris` dates the undated files in it and
+     its subfolders. This only happens if no file in it has an EXIF date outside that
+     day, month, year or range (give or take a day). The files get noon of the first
+     day, one second apart. A file whose own name has a date inside the folder's period
+     gets that date instead, as it is more precise.
+  2. **File name.** The files no folder dated get the date in their file name:
+     `IMG_20190714_153012`, `PXL_20190714_153012345`, `IMG-20190714-WA0001` (WhatsApp,
+     date only: noon, one second apart), `2019-07-14 15.30.12`, ... This only happens if
+     every one of those files has a date in its name or EXIF, and no EXIF date
+     contradicts its name.
+
+  Times in names are taken as this computer's time zone. What a name can't date,
+  `--date` covers, if given. The output says which step was used, or why not.
 - **`--place`** takes coordinates (`"41.9, 12.5"`) or a place name, which is looked up
   on OpenStreetMap (only the name is sent). The match is printed so you can check it.
 - Both are set **in Immich**, after the upload, and then read back. The files

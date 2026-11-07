@@ -8,8 +8,9 @@ For each folder given:
   2. Find out which files Immich already has (same SHA-1 checksum). Those
      are not sent again, and their date and place are left alone.
   3. Read the capture date of each file to upload. If any has none, stop
-     before uploading (Immich would date it by the file time), unless --date
-     gives one or --allow-undated is set. --place gives a location to files
+     before uploading (Immich would date it by the file time), unless
+     --date-from-name finds one in the folder or file name, --date gives one,
+     or --allow-undated is set. --place gives a location to files
      without GPS. If some files have a date (or place) and others not, the
      script lists them and asks before going on.
   4. Upload, then check that every file is in Immich under its exact
@@ -844,7 +845,7 @@ def process(folder: Path, args, api: Immich, media_ext, sidecar_ext, log: Log) -
     cands = [m for m in s.media if m.state != "failed"] if args.force else todo
     if existing and not args.force and (args.date or args.place):
         print(f"  The {files(len(existing))} already in Immich keep their date and place (--force to redo them).")
-    plan = meta_plan(cands, args)
+    plan = meta_plan(cands, args, folder, s.media)
     if not plan_ok(plan, args):
         print("  Skipped, nothing uploaded or changed.")
         return False
@@ -1002,24 +1003,155 @@ class MetaPlan:
     nogps: list[MediaFile]
     have_date: list[MediaFile]  # with --date, when some files have a date and others not
     have_place: list[MediaFile]  # with --place, likewise
-    dates: dict[str, dt.datetime]  # rel -> date to set
+    dates: dict[str, dt.datetime]  # rel -> date to set (from --date-from-name or --date)
     places: set[str]  # rel of the files to get the place
     stop: bool  # files without a date and neither --date nor --allow-undated
+    named: dict[str, str] = field(default_factory=dict)  # rel -> where --date-from-name found its date
+    notes: list[str] = field(default_factory=list)  # why --date-from-name did not use a name
 
 
-def meta_plan(cands: list[MediaFile], args) -> MetaPlan:
-    read_all(cands, args.jobs)
-    undated = [m for m in cands if not m.meta.date]
+# Dates in names, for --date-from-name: "IMG_20190714_153012", "IMG-20190714-WA0001", "2019-07-14 15.30.12",
+# "Screenshot_2019-07-14-15-30-12"; folders like "2019-07-14 Iceland", "2019-07 Iceland", "Rome 1998",
+# or a range "2019-07-14 - 2019-07-20".
+NAME_DATE = re.compile(r"(?<!\d)((?:19|20)\d\d)([-_.]?)(0[1-9]|1[0-2])\2(0[1-9]|[12]\d|3[01])"
+                       r"(?:[-_ T.]?([01]\d|2[0-3])[-_.:h]?([0-5]\d)[-_.:m]?([0-5]\d)|(?!\d))")
+NAME_YM = re.compile(r"(?<!\d)((?:19|20)\d\d)[-_. ](0[1-9]|1[0-2])(?!\d)")
+NAME_Y = re.compile(r"(?<!\d)((?:19|20)\d\d)(?!\d)")
+DAY = dt.timedelta(days=1)
+
+
+def name_dates(text: str) -> list[tuple[dt.datetime, bool]]:
+    """All dates in a name, each with whether it has a time of day."""
+    out = []
+    for m in NAME_DATE.finditer(text):
+        y, mo, d = int(m.group(1)), int(m.group(3)), int(m.group(4))
+        if not 1900 <= y <= dt.date.today().year + 1:
+            continue
+        try:
+            if m.group(5):
+                out.append((dt.datetime(y, mo, d, int(m.group(5)), int(m.group(6)), int(m.group(7))), True))
+            else:
+                out.append((dt.datetime(y, mo, d, 12), False))
+        except ValueError:
+            pass
+    return out
+
+
+def folder_period(name: str) -> tuple[dt.date, dt.date, str] | None:
+    """The day, month, year or range a folder name gives: (first day, last day, as written)."""
+    full = name_dates(name)
+    if full:
+        a, b = full[0][0].date(), full[min(1, len(full) - 1)][0].date()
+        a, b = min(a, b), max(a, b)
+        return a, b, a.isoformat() if a == b else f"{a.isoformat()} to {b.isoformat()}"
+    this_year = dt.date.today().year + 1
+    m = NAME_YM.search(name)
+    if m and 1900 <= int(m.group(1)) <= this_year:
+        y, mo = int(m.group(1)), int(m.group(2))
+        nxt = dt.date(y + (mo == 12), mo % 12 + 1, 1)
+        return dt.date(y, mo, 1), nxt - DAY, f"{y}-{mo:02d}"
+    m = NAME_Y.search(name)
+    if m and 1900 <= int(m.group(1)) <= this_year:
+        y = int(m.group(1))
+        return dt.date(y, 1, 1), dt.date(y, 12, 31), str(y)
+    return None
+
+
+def near(day: str, a: dt.date, b: dt.date) -> bool:
+    """An EXIF day (YYYY-MM-DD) inside a..b, give or take a day (time zones, parties past midnight)."""
+    d = dt.date.fromisoformat(day)
+    return a - DAY <= d <= b + DAY
+
+
+def dates_from_names(root: Path, media: list[MediaFile], wanted: list[MediaFile]):
+    """--date-from-name for the files in `wanted` (those without a date).
+
+    1. A folder with a date in its name dates the undated files in it (and its subfolders), if no file
+       in it has an EXIF date outside that day, month, year or range. A file whose own name has a date
+       inside that period gets the date from its name instead, as it is more precise.
+    2. The files no folder dated get the date in their file name, if every one of them has a date in
+       its name or EXIF, and no EXIF date contradicts the name.
+    Returns {rel: date}, {rel: where it came from} and notes on why names were not used."""
+    dates, src, notes = {}, {}, []
+    if not wanted:
+        return dates, src, notes
+    want = {m.rel for m in wanted}
+    groups: dict[str, list[MediaFile]] = {}
+    periods = {}
+    for m in media:
+        parts = [root.name] + list(Path(m.rel).parts[:-1])
+        for i in range(len(parts), 0, -1):  # the innermost folder with a date in its name
+            if (p := folder_period(parts[i - 1])):
+                key = "/".join(parts[:i])
+                periods[key] = p
+                groups.setdefault(key, []).append(m)
+                break
+
+    covered = set()
+    for key, group in sorted(groups.items()):
+        a, b, label = periods[key]
+        folder = key.split("/")[-1]
+        bad = [m for m in group if m.meta.date and not near(m.meta.date, a, b)]
+        if bad:
+            notes.append(f"folder '{folder}' ({label}) not used: {files(len(bad))} in it {'has' if len(bad) == 1 else 'have'} "
+                         f"an EXIF date outside it, e.g. {bad[0].rel} ({bad[0].meta.date})")
+            continue
+        covered |= {m.rel for m in group}
+        n = 0
+        for m in sorted((m for m in group if m.rel in want), key=lambda m: m.rel.lower()):
+            own = [d for d, _ in name_dates(m.path.name) if a <= d.date() <= b]
+            if own:
+                dates[m.rel], src[m.rel] = own[0], "file name"
+            else:  # noon of the first day, one second apart in file name order
+                dates[m.rel] = dt.datetime.combine(a, dt.time(12)) + dt.timedelta(seconds=n)
+                src[m.rel] = f"folder '{folder}'"
+                n += 1
+
+    rest = [m for m in media if m.rel not in covered]
+    if any(m.rel in want for m in rest):
+        named = {m.rel: name_dates(m.path.name) for m in rest}
+        missing = [m for m in rest if not m.meta.date and not named[m.rel]]
+        contra = [m for m in rest if m.meta.date and named[m.rel]
+                  and not near(m.meta.date, named[m.rel][0][0].date(), named[m.rel][0][0].date())]
+        if missing:
+            notes.append(f"file names not used: {files(len(missing))} {'has' if len(missing) == 1 else 'have'} "
+                         f"no date in the name or EXIF, e.g. {missing[0].rel}")
+        elif contra:
+            m = contra[0]
+            notes.append(f"file names not used: {files(len(contra))} {'has' if len(contra) == 1 else 'have'} an EXIF date "
+                         f"that contradicts the name, e.g. {m.rel} (EXIF {m.meta.date})")
+        else:
+            per_day: dict[dt.date, int] = {}
+            for m in sorted((m for m in rest if m.rel in want), key=lambda m: m.rel.lower()):
+                d, has_time = named[m.rel][0]
+                if not has_time:  # e.g. WhatsApp: noon, one second apart in file name order
+                    k = per_day.get(d.date(), 0)
+                    per_day[d.date()] = k + 1
+                    d += dt.timedelta(seconds=k)
+                dates[m.rel], src[m.rel] = d, "file name"
+    return {r: d.astimezone() for r, d in dates.items()}, src, notes
+
+
+def meta_plan(cands: list[MediaFile], args, root: Path, media: list[MediaFile]) -> MetaPlan:
+    """What the run will do about dates and places. `cands` are the files that count (the ones to upload,
+    with --force all); `media` are all files of the folder, which --date-from-name checks against."""
+    from_name = args.date_from_name and not (args.force and args.date)  # --force --date: one date for all
+    read_all(media if from_name else cands, args.jobs)
+    named_dates, named, notes = ({}, {}, [])
+    if from_name:
+        named_dates, named, notes = dates_from_names(root, media, [m for m in cands if not m.meta.date])
+    undated = [m for m in cands if not m.meta.date and m.rel not in named_dates]
     nogps = [m for m in cands if not m.meta.gps]
     set_date = (cands if args.force else undated) if args.date else []
     dates = {}  # one second apart in file name order, so scans keep their order in the timeline
     for m in sorted(set_date, key=lambda m: m.rel.lower()):
         dates.setdefault(m.rel, args.date + dt.timedelta(seconds=len(dates)))
+    dates.update(named_dates)
     places = {m.rel for m in (cands if args.force else nogps)} if args.place else set()
-    have_date = [m for m in cands if m.meta.date] if args.date and undated else []
+    have_date = [m for m in cands if m.meta.date or m.rel in named_dates] if args.date and undated else []
     have_place = [m for m in cands if m.meta.gps] if args.place and nogps else []
     stop = bool(undated) and not args.date and not args.allow_undated
-    return MetaPlan(cands, undated, nogps, have_date, have_place, dates, places, stop)
+    return MetaPlan(cands, undated, nogps, have_date, have_place, dates, places, stop, named, notes)
 
 
 def plan_ok(plan: MetaPlan, args) -> bool:
@@ -1030,15 +1162,26 @@ def plan_ok(plan: MetaPlan, args) -> bool:
               + (f"; {len(plan.undated)} without a date" if plan.undated else ""))
     elif plan.cands:
         print("  No file has a date")
+    if args.date_from_name:
+        by_src: dict[str, int] = {}
+        for src in plan.named.values():
+            by_src[src] = by_src.get(src, 0) + 1
+        if by_src:
+            print(f"  {'Would take' if args.dry_run else 'Taking'} dates from names: "
+                  + ", ".join(f"{files(n)} from {src if src != 'file name' else 'their file name'}"
+                              for src, n in sorted(by_src.items())))
+        for note in plan.notes:
+            print(f"  --date-from-name: {note}")
     show("no date:", [m.rel + ("" if m.meta.readable else "  (file type not checked)") for m in plan.undated], 20)
     if plan.stop:
         return True
     will = "Would set" if args.dry_run else "Will set"
     if args.date:
-        if plan.dates:
-            over = sum(bool(m.meta.date) for m in plan.cands if m.rel in plan.dates)
-            print(f"  {will} the date {args.date.isoformat()} on {files(len(plan.dates))}"
-                  + (", one second apart in file name order" if len(plan.dates) > 1 else "")
+        fill = [r for r in plan.dates if r not in plan.named]
+        if fill:
+            over = sum(bool(m.meta.date) for m in plan.cands if m.rel in fill)
+            print(f"  {will} the date {args.date.isoformat()} on {files(len(fill))}"
+                  + (", one second apart in file name order" if len(fill) > 1 else "")
                   + (f" (--force: overwriting the date of {over})" if over else ""))
         else:
             print("  Every file to upload has a date; --date is not needed here.")
@@ -1294,6 +1437,11 @@ def main() -> int:
                     help="set this location in Immich on the uploaded files that have none: "
                          "\"64.1466, -21.9426\" or a place name, looked up on OpenStreetMap, e.g. "
                          "\"Reykjavik, Iceland\". Asks like --date")
+    ap.add_argument("--date-from-name", action="store_true",
+                    help="date files that have none from the folder name (\"2019-07 Iceland\", \"Rome 1998\"), "
+                         "if no file in that folder has an EXIF date outside it; else from the file name "
+                         "(IMG_20190714_153012, IMG-20190714-WA0001), if every file has a date in its name or "
+                         "EXIF and none contradicts its name. --date covers what is left")
     ap.add_argument("--allow-undated", action="store_true",
                     help="upload files without a date anyway (Immich then uses the file time)")
     ap.add_argument("--delete", action="store_true",
@@ -1397,7 +1545,7 @@ def list_files(folder: Path, args, log: Log, api: Immich | None, media_ext, side
     if api and s.media and not skip:
         in_immich(s.media, args, api)
     cands = [m for m in s.media if m.state != "failed"] if args.force else [m for m in s.media if m.state == "pending"]
-    plan = meta_plan(cands, args)
+    plan = meta_plan(cands, args, folder, s.media)
 
     def what(m: MediaFile) -> str:
         if skip:
@@ -1409,7 +1557,9 @@ def list_files(folder: Path, args, log: Log, api: Immich | None, media_ext, side
             return "in Immich, left as is"
         if plan.stop:
             return "NO DATE: stops the folder" if not m.meta.date else "ok, but the folder stops"
-        if m.rel in plan.dates:
+        if m.rel in plan.named:
+            out.append(f"date from {plan.named[m.rel]} {plan.dates[m.rel]:%Y-%m-%d %H:%M:%S}")
+        elif m.rel in plan.dates:
             out.append(f"{'overwrite' if m.meta.date else 'set'} date {plan.dates[m.rel]:%Y-%m-%d %H:%M:%S}")
         elif not m.meta.date:
             out.append("no date")
@@ -1452,6 +1602,8 @@ def list_files(folder: Path, args, log: Log, api: Immich | None, media_ext, side
         elif (plan.have_date or plan.have_place) and not args.force:
             summary += "; asks first, as some have a date/place and others not"
     print(summary)
+    for note in plan.notes if not skip else []:
+        print(f"  --date-from-name: {note}")
     if not api and not skip:
         print("  (Not checked which files Immich already has: no server set. They would be left as they are.)")
 
