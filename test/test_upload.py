@@ -260,7 +260,8 @@ def test_list_files_with_server(run, immich, folder):
     photo(folder, "IMG_20200102_153012.jpg")
     rc, out = run("-L", "--date-from-name", folder)
     assert rc == 0 and "in Immich, left as is" in out
-    assert "upload, date from file name 2020-01-02 15:30:12" in out
+    row = next(l for l in out.splitlines() if "IMG_20200102_153012.jpg" in l)
+    assert "-> 2020-01-02 15:30:12" in row and "file name" in row and "upload, date from file name" in row
     assert not immich.album("Iceland")  # changes nothing
 
 
@@ -312,3 +313,10 @@ def test_dry_run_with_a_bad_key_still_lists(run, immich, folder, monkeypatch):
     photo(folder, "a.jpg", "2019:07:14 15:30:00")
     rc, out = run("-n", folder)
     assert rc == 2 and "a.jpg" in out and "Immich refused the API key" in run.err
+
+
+def test_dry_run_shows_planned_date_and_place_in_the_columns(run, immich, folder):
+    photo(folder, "scan.jpg")
+    rc, out = run("-n", "--date", "1998-08-14+00:00", "--place", "41.9, 12.5", folder)
+    row = next(l for l in out.splitlines() if "scan.jpg" in l)
+    assert "-> 1998-08-14 12:00:00 +00:00" in row and "--date" in row and "-> 41.90000, 12.50000" in row

@@ -60,11 +60,11 @@ set, it also checks the key and which files Immich has; without one, it works of
 ```
 == D:\Photos\2019 Iceland
   Album '2019 Iceland' (new), tag Travel
-  File       Size   Taken                Date from              Location             Camera  Plan
-  ---------  -----  -------------------  ---------------------  -------------------  ------  --------------------------------------------------
-  dated.jpg   87 B  2019-07-14 15:30:00  EXIF DateTimeOriginal  -                    -       upload, keeps its date (matches --date), set place
-  gps.jpg    201 B  2019-07-15 03:04:05  EXIF DateTimeOriginal  64.14660, -21.94260  -       in Immich, left as is
-  scan.jpg    13 B  -                    -                      -                    -       upload, set date 2019-07-01 12:00:00, set place
+  File       Size   Taken                          Date from              Location                Camera  Plan
+  ---------  -----  -----------------------------  ---------------------  ----------------------  ------  --------------------------------------------------
+  dated.jpg   87 B  2019-07-14 15:30:00            EXIF DateTimeOriginal  -> 64.14660, -21.94260  -       upload, keeps its date (matches --date), set place
+  gps.jpg    201 B  2019-07-15 03:04:05            EXIF DateTimeOriginal  64.14660, -21.94260     -       in Immich, left as is
+  scan.jpg    13 B  -> 2019-07-01 12:00:00 +02:00  --date                 -> 64.14660, -21.94260  -       upload, set date, set place
   3 files (301 B), taken 2019-07-14 15:30 to 2019-07-15 03:04; 1 already in Immich, 2 to upload
   Dates, of them: 1 get --date; 1 keep a date matching --date
   Place, of them: 2 files get 64.14660, -21.94260

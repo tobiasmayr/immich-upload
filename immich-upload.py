@@ -1627,9 +1627,9 @@ def preview(folder: Path, args, log: Log, api: Immich | None, media_ext, sidecar
         if plan.stop:
             return "NO DATE: stops the folder" if not m.meta.date else "ok, but the folder stops"
         if m.rel in plan.named:
-            out.append(f"date from {plan.named[m.rel]} {plan.dates[m.rel]:%Y-%m-%d %H:%M:%S}")
+            out.append(f"date from {plan.named[m.rel]}")
         elif m.rel in plan.dates:
-            out.append(f"{'overwrite' if m.meta.date else 'set'} date {plan.dates[m.rel]:%Y-%m-%d %H:%M:%S}")
+            out.append(f"{'overwrite' if m.meta.date else 'set'} date")
         elif m in plan.agree:
             out.append("keeps its date (matches --date)")
         elif not m.meta.date:
@@ -1644,10 +1644,19 @@ def preview(folder: Path, args, log: Log, api: Immich | None, media_ext, sidecar
         return "yes" if meta.gps else "-"
 
     rows = [["File", "Size", "Taken", "Date from", "Location", "Camera", "Plan"]]
-    for m in s.media:
-        taken = m.meta.when or ("-" if m.meta.readable else "(not checked)")
-        rows.append([m.rel + (" +xmp" if m.sidecar else ""), human(m.size), taken, m.meta.src or "-",
-                     place(m.meta), m.meta.camera or "-", what(m)])
+    for m in s.media:  # "-> ..." is what a run would set
+        planned = not skip and m in plan.cands and not plan.stop
+        if planned and m.rel in plan.dates:
+            taken = f"-> {plan.dates[m.rel]:%Y-%m-%d %H:%M:%S %z}"
+            taken = taken[:-2] + ":" + taken[-2:]
+        else:
+            taken = m.meta.when or ("-" if m.meta.readable else "(not checked)")
+        where = f"-> {args.place[0]:.5f}, {args.place[1]:.5f}" if planned and m.rel in plan.places else place(m.meta)
+        src = m.meta.src or "-"
+        if planned and m.rel in plan.dates:
+            src = plan.named.get(m.rel, "--date")
+        rows.append([m.rel + (" +xmp" if m.sidecar else ""), human(m.size), taken, src,
+                     where, m.meta.camera or "-", what(m)])
     if len(rows) > 1:
         widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
         for n, r in enumerate(rows):
