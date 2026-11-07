@@ -169,3 +169,8 @@ real Documents folder, on Linux the XDG documents folder. Set `--log` or
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for how the script is built and how to run the tests.
+
+## License
+
+Copyright (C) 2026 Tobias Mayr. Licensed under the GNU General Public License,
+version 3 or (at your option) any later version. See [LICENSE](LICENSE).
