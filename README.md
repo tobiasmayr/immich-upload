@@ -16,7 +16,7 @@ Immich v3 API.
 ```sh
 export IMMICH_URL=https://photos.example.org   # Windows: setx IMMICH_URL ..., then a new terminal
 
-immich-upload.py -L FOLDER            # look first: each file's date, place and what would happen
+immich-upload.py -n FOLDER            # look first: each file's date, place and what would happen
 immich-upload.py FOLDER               # upload into an album named after the folder
 immich-upload.py --delete FOLDER      # ... and delete the folder once all is verified
 ```
@@ -54,15 +54,21 @@ New-Item -Force -ItemType Directory "$env:APPDATA\immich-upload" | Out-Null
 For a key file somewhere else, use `--api-key-file FILE` or `IMMICH_API_KEY_FILE`. `IMMICH_API_KEY` and
 `--api-key` work too, but are easier to leak.
 
-`-L` shows what a run with the same options would do (with a server set, it also checks
-which files Immich has):
+`-n` changes nothing and shows what a run with the same options would do. With a server
+set, it also checks the key and which files Immich has; without one, it works offline:
 
 ```
-File          Size   Taken                Date from              Location             Camera  Plan
-------------  -----  -------------------  ---------------------  -------------------  ------  ----------------------------------------
-dated.jpg     397 B  2019-07-14 15:30:00  EXIF DateTimeOriginal  -                    -       upload, set place
-gps.jpg       511 B  2018-01-02 03:04:05  EXIF DateTimeOriginal  64.14660, -21.94260  -       in Immich, left as is
-zerodate.jpg  397 B  -                    -                      -                    -       upload, set date 1990-01-01 12:00:00, set place
+== D:\Photos\2019 Iceland
+  Album '2019 Iceland' (new), tag Travel
+  File       Size   Taken                Date from              Location             Camera  Plan
+  ---------  -----  -------------------  ---------------------  -------------------  ------  --------------------------------------------------
+  dated.jpg   87 B  2019-07-14 15:30:00  EXIF DateTimeOriginal  -                    -       upload, keeps its date (matches --date), set place
+  gps.jpg    201 B  2019-07-15 03:04:05  EXIF DateTimeOriginal  64.14660, -21.94260  -       in Immich, left as is
+  scan.jpg    13 B  -                    -                      -                    -       upload, set date 2019-07-01 12:00:00, set place
+  3 files (301 B), taken 2019-07-14 15:30 to 2019-07-15 03:04; 1 already in Immich, 2 to upload
+  Dates, of them: 1 get --date; 1 keep a date matching --date
+  Place, of them: 2 files get 64.14660, -21.94260
+  --delete: once all 3 are verified, deletes them; then the folder
 ```
 
 ## Options
@@ -76,9 +82,9 @@ zerodate.jpg  397 B  -                    -                      -              
 | `--place PLACE` | place for files without GPS: `"41.9, 12.5"` or a name, looked up on OpenStreetMap |
 | `--allow-undated` | upload files without a date anyway |
 | `--delete` | delete uploaded files, sidecars and junk once all is verified; other files stay |
-| `-n` | dry run |
+| `-n` (or `-L`) | dry run: list the files and what would happen; changes nothing |
 | `-f` | force: redo a verified folder as a re-upload (see below) |
-| `-L`, `--list-albums`, `--list-tags` | list local files, albums or tags; changes nothing |
+| `--list-albums`, `--list-tags` | list the albums or tags in Immich |
 | `--api-key-file FILE` | read the API key from FILE instead of the default path |
 
 `immich-upload.py -h` shows all options.

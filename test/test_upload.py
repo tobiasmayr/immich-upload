@@ -67,9 +67,11 @@ def test_trashed_file_fails(run, immich, folder):
 
 def test_dry_run_uploads_nothing(run, immich, folder):
     photo(folder, "a.jpg", "2019:07:14 15:30:00")
-    rc, out = run("-n", folder)
-    assert rc == 0 and "would upload: a.jpg" in out
-    assert not immich.assets and not run.log.exists()
+    rc, out = run("-n", "-t", "Travel", "--delete", folder)
+    assert rc == 0 and "Dry run: nothing is uploaded" in out
+    assert "a.jpg" in out and "upload" in out
+    assert not immich.assets and not immich.albums and not immich.tags and not run.log.exists()
+    assert (folder / "a.jpg").exists()
 
 
 def test_album_and_tags(run, immich, folder):
@@ -246,9 +248,10 @@ def test_list_files_without_server(run, no_server, folder):
     photo(folder, "a.jpg", "2019:07:14 15:30:00", gps=(64.1466, -21.9426))
     photo(folder, "scan.jpg")
     rc, out = run("-L", folder)
-    assert rc == 0
+    assert rc == 1  # a run would stop
     assert "2019-07-14 15:30:00" in out and "64.14660, -21.94260" in out
-    assert "NO DATE: stops the folder" in out and "no server set" in out
+    assert "NO DATE: stops the folder" in out and "Checking the local files only: no Immich URL" in out
+    assert "Album 'Iceland' (not checked)" in out
 
 
 def test_list_files_with_server(run, immich, folder):
@@ -271,3 +274,41 @@ def test_list_albums_and_tags(run, immich, folder):
 def test_help_runs_as_a_program():
     r = subprocess.run([sys.executable, str(SCRIPT), "-h"], capture_output=True, text=True)
     assert r.returncode == 0 and "--date-from-name" in r.stdout
+
+
+def test_dry_run_summary(run, immich, folder):
+    old = photo(folder, "old.jpg", "2019:07:14 11:06:00")
+    immich.add(old.read_bytes(), "old.jpg")
+    photo(folder, "a.jpg", "2019:07:14 16:35:00")
+    write(folder / "Thumbs.db", b"junk")
+    rc, out = run("-n", "-t", "Events", "--delete", folder)
+    assert rc == 0
+    assert "Would create tag: Events" in out
+    assert "Album 'Iceland' (new), tag Events" in out
+    assert "2 files (" in out and "taken 2019-07-14 11:06 to 16:35; 1 already in Immich, 1 to upload" in out
+    assert "Dates, of them: no file lacks a date" in out
+    assert "--delete: once all 2 are verified, deletes them, 1 junk file; then the folder" in out
+
+
+def test_dry_run_existing_album_and_kept_folder(run, immich, folder):
+    photo(folder, "a.jpg", "2019:07:14 15:30:00")
+    write(folder / "notes.txt", b"keep")
+    immich.albums["x"] = {"name": "Iceland", "ids": set()}
+    rc, out = run("-n", "--delete", folder)
+    assert "Album 'Iceland' (exists)" in out
+    assert "deletes them; the folder stays (1 other file in it)" in out
+
+
+def test_dry_run_tells_what_would_ask(run, immich, folder):
+    photo(folder, "a.jpg", "2015:05:05 05:05:05")
+    photo(folder, "scan.jpg")
+    rc, out = run("-n", "--date", "1998", folder)
+    assert rc == 1 and "A run would ask first: some files have a date/place and others not" in out
+    assert not run.questions  # a dry run never asks
+
+
+def test_dry_run_with_a_bad_key_still_lists(run, immich, folder, monkeypatch):
+    monkeypatch.setenv("IMMICH_API_KEY", "wrong")
+    photo(folder, "a.jpg", "2019:07:14 15:30:00")
+    rc, out = run("-n", folder)
+    assert rc == 2 and "a.jpg" in out and "Immich refused the API key" in run.err

@@ -33,10 +33,10 @@ The sections of `immich-upload.py`, in order:
 | log | `Log`: the Markdown log, one row per folder |
 | main work | `process()`: one folder, from scan to delete |
 | --date / --place | `in_immich()`, `meta_plan()`, `dates_from_names()`, `plan_ok()`, `set_date_place()` |
-| (after that) | option parsing, `--list-albums`, `--list-tags`, `--list-files`, `main()` |
+| (after that) | option parsing, `--list-albums`, `--list-tags`, the dry run (`preview()`), `main()` |
 
 `meta_plan()` decides everything about dates and places for a folder. Both the upload
-and `--list-files` use it, so the listing always shows what a run would do.
+and the dry run use it, so the dry run always shows what a run would do.
 
 ## Immich API
 
@@ -69,7 +69,7 @@ the "stop on undated files" check is wrong. It follows Immich's own list in
 When adding a format or tag, check that list first.
 
 Formats the reader cannot look into return `readable=False` and count as undated.
-Besides the yes/no answer, `Meta` also carries what `--list-files` shows: the full
+Besides the yes/no answer, `Meta` also carries what the dry run shows: the full
 timestamp (`when`), where the date came from (`src`), the coordinates and the camera.
 
 ## Tests

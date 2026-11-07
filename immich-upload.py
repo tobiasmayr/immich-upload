@@ -39,10 +39,11 @@ For each folder given:
 --place then apply to every file, also those already in Immich, overwriting
 dates and places they have, without asking.
 
---list-files (-L) changes nothing: it lists each file in the folders with its
-date (and which tag it came from), location and camera, and what an upload
-with the same options would do. With a server set, it also checks which
-files Immich already has.
+--dry-run (-n, or -L / --list-files) changes nothing: it lists each file in the
+folders with its date (and which tag it came from), location and camera, and
+what a run with the same options would do: album, tags, dates, places, and
+what --delete would remove. With a server set, it also checks the API key and
+which files Immich already has; without one, it works from the local files.
 
 Needs only the Python standard library (3.9+), so it runs on Linux and Windows.
 
@@ -251,7 +252,7 @@ class Meta:
     date: str | None = None  # YYYY-MM-DD of the capture date, None = no date
     gps: bool = False
     readable: bool = True  # False = file format this script cannot look into
-    # for --list-files only:
+    # for the dry run's listing only:
     when: str | None = None  # the date as stored, e.g. "2019-07-14 15:30:12 +02:00"
     src: str | None = None  # where the date came from, e.g. "EXIF DateTimeOriginal"
     where: tuple[float, float] | None = None  # latitude, longitude
@@ -901,20 +902,11 @@ def process(folder: Path, args, api: Immich, media_ext, sidecar_ext, log: Log) -
     if plan.stop:
         print(f"  Stopped before uploading: Immich would date {'this file' if len(plan.undated) == 1 else 'these files'}"
               " by the file time. Give a date with --date, or upload anyway with --allow-undated.")
-        if not args.dry_run:
-            log.record(folder, album=album, tags=[], files=len(s.media), new=0,
-                       status=f"stopped: {len(plan.undated)} without date", deleted="no",
-                       now=dt.datetime.now().strftime("%Y-%m-%d %H:%M"))
-            print(f"  Logged to {args.log}")
+        log.record(folder, album=album, tags=[], files=len(s.media), new=0,
+                   status=f"stopped: {len(plan.undated)} without date", deleted="no",
+                   now=dt.datetime.now().strftime("%Y-%m-%d %H:%M"))
+        print(f"  Logged to {args.log}")
         return False
-
-    if args.dry_run:
-        for m in todo[:20]:
-            print(f"    would upload: {m.rel}")
-        if len(todo) > 20:
-            print(f"    ... and {len(todo) - 20} more")
-        print("  Dry run: nothing uploaded, logged or deleted.")
-        return True
 
     # 3. upload
     def up(m: MediaFile):
@@ -1015,7 +1007,7 @@ def process(folder: Path, args, api: Immich, media_ext, sidecar_ext, log: Log) -
 
 # --------------------------------------------------------------------------- --date / --place, set in Immich
 
-# The photo and video types Immich takes (from its mime.ts), for --list-files without a server.
+# The photo and video types Immich takes (from its mime.ts), for a dry run without a server.
 MEDIA_EXT = set(
     ".3fr .ari .arw .cap .cin .cr2 .cr3 .crw .dcr .dng .erf .fff .iiq .k25 .kdc .mrw .nef .nrw .orf .ori .pef "
     ".psd .raf .raw .rw2 .rwl .sr2 .srf .srw .x3f .avif .bmp .gif .jfif .jpeg .jpg .png .webp .heic .heif .hif "
@@ -1232,7 +1224,7 @@ def plan_ok(plan: MetaPlan, args) -> bool:
         for src in plan.named.values():
             by_src[src] = by_src.get(src, 0) + 1
         if by_src:
-            print(f"  {'Would take' if args.dry_run else 'Taking'} dates from names: "
+            print("  Taking dates from names: "
                   + ", ".join(f"{files(n)} from {src if src != 'file name' else 'their file name'}"
                               for src, n in sorted(by_src.items())))
         for note in plan.notes:
@@ -1240,7 +1232,7 @@ def plan_ok(plan: MetaPlan, args) -> bool:
     show("no date:", [m.rel + ("" if m.meta.readable else "  (file type not checked)") for m in plan.undated], 20)
     if plan.stop:
         return True
-    will = "Would set" if args.dry_run else "Will set"
+    will = "Will set"
     if args.date and plan.agree:
         print(f"  {files(len(plan.agree))} already {'has' if len(plan.agree) == 1 else 'have'} a date matching "
               f"--date {args.date.strftime('%Y-%m-%d %H:%M:%S')[:args.date_prec]} and "
@@ -1279,9 +1271,6 @@ def plan_ok(plan: MetaPlan, args) -> bool:
                         f"{'has' if len(plan.have_place) == 1 else 'have'} a location")
             show("has a location:", [m.rel for m in plan.have_place])
         asks.append("set --date/--place only on the others")
-    if args.dry_run:
-        print(f"  ! {'; '.join(warn)}. Without --dry-run this asks first (--force: does not ask).")
-        return True
     return confirm(f"{'; '.join(warn)}. Upload, and {' and '.join(asks)}?")
 
 
@@ -1503,10 +1492,7 @@ def main() -> int:
     ap.add_argument("-l", "--list-albums", action="store_true",
                     help="list the albums in Immich and exit (uploads nothing)")
     ap.add_argument("--list-tags", action="store_true", help="list the tags in Immich and exit (uploads nothing)")
-    ap.add_argument("-L", "--list-files", action="store_true",
-                    help="list the local files in FOLDER(s) with their date, location and camera, and what an "
-                         "upload with the same options would do (with a server: which files Immich has); "
-                         "changes nothing")
+    ap.add_argument("-L", "--list-files", action="store_true", help="the same as --dry-run")
     ap.add_argument("-a", "--album",
                     help="album name (default: the album the log has for the folder, else the folder's name)")
     ap.add_argument("-t", "--tag", action="append", default=[], metavar="TAG",
@@ -1532,7 +1518,9 @@ def main() -> int:
                     help="delete the uploaded files and the folder once everything is verified")
     ap.add_argument("--log", type=Path, default=default_log(),
                     help=f"Markdown log of uploaded folders (default: {default_log()})")
-    ap.add_argument("-n", "--dry-run", action="store_true", help="only show what would be uploaded or edited")
+    ap.add_argument("-n", "--dry-run", action="store_true",
+                    help="change nothing: list each file with its date, location and camera, and what a run with "
+                         "the same options would do (with a server set: also which files Immich has)")
     ap.add_argument("-f", "--force", action="store_true",
                     help="redo folders the log lists as verified, as a re-upload: --date/--place then apply to "
                          "every file, also those already in Immich, overwriting their date/place, without asking")
@@ -1546,24 +1534,8 @@ def main() -> int:
     args.api_key = api_key(args, ap)
     args.date, args.date_prec = args.date or (None, 0)
 
-    if args.list_files:
-        folders = check_folders(ap, args)
-        if args.place:
-            lat, lon, args.place_name = parse_place(args.place)
-            args.place = (lat, lon)
-            print(f"Place: {args.place_name}")
-        api, media_ext, sidecar_ext = None, MEDIA_EXT, {".xmp"}
-        if args.server and args.api_key:
-            try:
-                api = Immich(args.server, args.api_key)
-                media_ext, sidecar_ext = api.media_types()
-            except (ApiError, OSError) as e:
-                print(f"Cannot ask Immich ({e}); listing the local files only.")
-                api = None
-        log = Log(args.log)
-        for f in folders:
-            list_files(f, args, log, api, media_ext, sidecar_ext)
-        return 0
+    if args.dry_run or args.list_files:
+        return preview_main(ap, args)
     if not args.server:
         ap.error("no Immich URL: set IMMICH_URL or use --server")
     if not args.api_key:
@@ -1599,13 +1571,9 @@ def main() -> int:
         try:
             existing = {t["value"] for t in api.tags()}
             missing = [t for t in args.tag if t not in existing]
-            if args.dry_run:
-                if missing:
-                    print(f"Would create tag(s): {', '.join(missing)}")
-            else:
-                args.tag_ids = api.upsert_tags(args.tag)
-                if missing:
-                    print(f"Created tag(s): {', '.join(missing)}")
+            args.tag_ids = api.upsert_tags(args.tag)
+            if missing:
+                print(f"Created tag(s): {', '.join(missing)}")
         except ApiError as e:
             print(f"Cannot set up the tags ({e}). The API key needs tag.read, tag.create and tag.asset.",
                   file=sys.stderr)
@@ -1622,15 +1590,25 @@ def main() -> int:
     return 0 if ok else 1
 
 
-def list_files(folder: Path, args, log: Log, api: Immich | None, media_ext, sidecar_ext) -> None:
-    """--list-files: each file with its date, place and camera, and what a run with the same options would do."""
+def preview(folder: Path, args, log: Log, api: Immich | None, media_ext, sidecar_ext) -> bool:
+    """-n / -L: each file with its date, place and camera, and what a run with the same options would do.
+    Returns False if that run would stop or ask before uploading."""
     s = scan(folder, media_ext, sidecar_ext)
     read_all(s.media, args.jobs)
     row = log.get(folder)
+    album = args.album or (row or {}).get("Album") or folder.name
     print(f"\n== {folder}")
+    state = "not checked"
+    if api:
+        try:
+            state = "exists" if api.album_id(album, create=False) else "new"
+        except ApiError as e:
+            state = f"cannot check: {e}"
+    print(f"  Album '{album}' ({state})" + (f", {'tag' if len(args.tag) == 1 else 'tags'} {', '.join(args.tag)}"
+                                           if args.tag else ""))
     if row:
         print(f"  Log: {row.get('Status')}, {row.get('Uploaded')} of {row.get('Files')} files uploaded by this "
-              f"script, album '{row.get('Album')}', last run {row.get('Last run')}")
+              f"script, last run {row.get('Last run')}")
     skip = (row and row.get("Status") == "verified" and row.get("Files") == str(len(s.media))
             and not (args.force or args.delete))
     if api and s.media and not skip:
@@ -1680,27 +1658,111 @@ def list_files(folder: Path, args, log: Log, api: Immich | None, media_ext, side
     for p in s.other:
         print(f"  not a photo/video, not uploaded: {p.relative_to(folder)}")
     for p in s.junk:
-        print(f"  system junk, deleted by --delete: {p.relative_to(folder)}")
+        print(f"  system junk{', deleted by --delete' if args.delete else ''}: {p.relative_to(folder)}")
 
-    summary = f"  {files(len(s.media))} ({human(sum(m.size for m in s.media))})"
+    # summary: what is there, then what a run would do about it
+    taken = sorted(m.meta.when[:16] for m in s.media if m.meta.when)
+    line = f"  {files(len(s.media))} ({human(sum(m.size for m in s.media))})"
+    if taken:
+        first, last = taken[0], taken[-1]
+        line += f", taken {first}" + (f" to {last[11:] if last[:10] == first[:10] else last}" if last != first else "")
     if skip:
-        summary += "; skipped (verified in the log, use --force to redo)"
-    else:
-        if api:
-            summary += f", {sum(m.state == 'existing' for m in s.media)} already in Immich"
-        summary += f"; of the {files(len(plan.cands))} {'checked (--force)' if args.force else 'to upload'}: " \
-                   f"{len(plan.undated)} without a date, {len(plan.nogps)} without a location"
-        if plan.stop:
-            summary += "; the upload stops here (use --date, or --allow-undated)"
-        elif not args.force and any(v.startswith("folder") for v in plan.named.values()):
-            summary += "; asks first, as some dates come from a folder name"
-        elif (plan.have_date or plan.have_place) and not args.force:
-            summary += "; asks first, as some have a date/place and others not"
-    print(summary)
-    for note in plan.notes if not skip else []:
+        print(line + "; skipped: verified in the log (--force to redo)")
+        return True
+    existing = sum(m.state == "existing" for m in s.media)
+    failed = [m for m in s.media if m.state == "failed"]
+    todo = sum(m.state == "pending" for m in s.media)
+    line += (f"; {existing} already in Immich, {todo} to upload" if api else f"; {todo} to upload")
+    print(line + (f", {len(failed)} rejected" if failed else ""))
+    counted = "of them" if not args.force else "with --force, of all"
+
+    if plan.stop:
+        print(f"  {files(len(plan.undated))} without a date: the upload stops here "
+              "(use --date, --date-from-name or --allow-undated)")
+    elif plan.undated and args.allow_undated:
+        print(f"  {files(len(plan.undated))} without a date, uploaded anyway (--allow-undated)")
+    elif plan.cands:
+        set_by_date = len([r for r in plan.dates if r not in plan.named])
+        parts = []
+        if plan.named:
+            parts.append(f"{len(plan.named)} dated from names")
+        if set_by_date:
+            parts.append(f"{set_by_date} get --date")
+        if plan.agree:
+            parts.append(f"{len(plan.agree)} keep a date matching --date")
+        print(f"  Dates, {counted}: " + ("; ".join(parts) if parts else "no file lacks a date"))
+    for note in plan.notes:
         print(f"  --date-from-name: {note}")
-    if not api and not skip:
-        print("  (Not checked which files Immich already has: no server set. They would be left as they are.)")
+    if plan.cands and not plan.stop:
+        if args.place:
+            print(f"  Place, {counted}: {files(len(plan.places))} get {args.place_name}")
+        elif plan.nogps:
+            print(f"  {files(len(plan.nogps))} without a location (--place would set one)")
+
+    asks = []
+    if not args.force and not plan.stop:
+        if any(v.startswith("folder") for v in plan.named.values()):
+            asks.append("some dates come from a folder name")
+        if plan.have_date or plan.have_place:
+            asks.append("some files have a date/place and others not")
+    if asks:
+        print(f"  A run would ask first: {'; '.join(asks)}")
+
+    if args.delete:
+        if plan.stop or failed:
+            print("  --delete: nothing, as the upload would not go through")
+        else:
+            n = len(s.other)
+            kept = f"the folder stays ({n} other {'file' if n == 1 else 'files'} in it)" if n else "then the folder"
+            plural = lambda k, word: f"{k} {word}{'' if k == 1 else 's'}"
+            extra = ", ".join(x for x in (plural(len(s.sidecars), "sidecar") if s.sidecars else "",
+                                         plural(len(s.junk), "junk file") if s.junk else "") if x)
+            print(f"  --delete: once all {len(s.media)} are verified, deletes them"
+                  + (f", {extra}" if extra else "") + f"; {kept}")
+    if not api:
+        print("  (Which files Immich already has was not checked: no server.)")
+    return not plan.stop and not failed and not asks
+
+
+def preview_main(ap, args) -> int:
+    """-n / -L: show what a run would do. Works without a server, then only from the local files."""
+    print("Dry run: nothing is uploaded, changed, logged or deleted.")
+    args.tag = list(dict.fromkeys(t.strip().strip("/") for t in args.tag if t.strip().strip("/")))
+    folders = check_folders(ap, args)
+    if args.place:
+        lat, lon, args.place_name = parse_place(args.place)
+        args.place = (lat, lon)
+        print(f"Place: {args.place_name}")
+    api, media_ext, sidecar_ext, rc = None, MEDIA_EXT, {".xmp"}, 0
+    missing = "no Immich URL" if not args.server else "no API key" if not args.api_key else None
+    if missing:
+        print(f"Checking the local files only: {missing}.")
+    else:
+        try:
+            api = Immich(args.server, args.api_key)
+            media_ext, sidecar_ext = api.media_types()
+            api.request("GET", "/albums", query={"name": "immich-upload key check"})  # checks the key works
+        except ApiError as e:
+            print(f"Immich refused the API key ({e}); checking the local files only.", file=sys.stderr)
+            api, media_ext, sidecar_ext, rc = None, MEDIA_EXT, {".xmp"}, 2
+        except OSError as e:
+            print(f"Cannot reach Immich at {args.server} ({e}); checking the local files only.", file=sys.stderr)
+            api, media_ext, sidecar_ext, rc = None, MEDIA_EXT, {".xmp"}, 2
+    if api and args.tag:
+        try:
+            have = {t["value"] for t in api.tags()}
+            new = [t for t in args.tag if t not in have]
+            if new:
+                print(f"Would create {'tag' if len(new) == 1 else 'tags'}: {', '.join(new)}")
+        except ApiError as e:
+            print(f"Cannot read the tags ({e}). The API key needs tag.read, tag.create and tag.asset.",
+                  file=sys.stderr)
+            rc = 2
+    log = Log(args.log)
+    ok = True
+    for f in folders:
+        ok = preview(f, args, log, api, media_ext, sidecar_ext) and ok
+    return rc or (0 if ok else 1)
 
 
 def check_folders(ap, args) -> list[Path]:
