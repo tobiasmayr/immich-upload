@@ -5,24 +5,36 @@ For each folder given:
   1. Find all photos and videos in it, including subfolders (the file types
      come from the Immich server itself). An .xmp sidecar next to a file is
      sent along with it.
-  2. Read each file's capture date. If any file has none, stop before
-     uploading (Immich would date it by the file time), unless --date gives
-     one or --allow-undated is set. --place gives files without GPS a location.
-  3. Upload the files Immich does not have yet. Files that are already there
-     (same SHA-1 checksum) are not sent again.
-  4. Check that every file is now in Immich under its exact checksum and not
-     in the trash.
+  2. Find out which files Immich already has (same SHA-1 checksum). Those
+     are not sent again, and their date and place are left alone.
+  3. Read the capture date of each file to upload. If any has none, stop
+     before uploading (Immich would date it by the file time), unless --date
+     gives one or --allow-undated is set. --place gives a location to files
+     without GPS. If some files have a date (or place) and others not, the
+     script lists them and asks before going on.
+  4. Upload, then check that every file is in Immich under its exact
+     checksum and not in the trash.
   5. Add all of them to an album (--album, else the one the log already has
-     for the folder, else the folder's name), and tag
-     them with any --tag given (missing tags are created). Set --date and
-     --place on the files that lack them, and read both back.
+     for the folder, else the folder's name), and tag them with any --tag
+     given (missing tags are created). Set --date and --place in Immich on
+     the files that lack them, and read both back. The files themselves are
+     not changed, so a later run still finds them by checksum.
   6. Record the folder in a Markdown log, one row per folder, updated on every
      run. A folder logged as verified is skipped next time, unless its number
-     of files changed (use --force to redo it anyway).
+     of files changed.
   7. With --delete, and only when every file checked out, delete the
      uploaded files, their sidecars and system junk (Thumbs.db, desktop.ini,
      ...), then the folder if nothing else is left in it. Other files are
      kept and listed.
+
+--force redoes a folder as a re-upload: also verified folders, and --date /
+--place then apply to every file, also those already in Immich, overwriting
+dates and places they have, without asking.
+
+--list-files (-L) changes nothing: it lists each file in the folders with its
+date (and which tag it came from), location and camera, and what an upload
+with the same options would do. With a server set, it also checks which
+files Immich already has.
 
 Needs only the Python standard library (3.9+), so it runs on Linux and Windows.
 
@@ -227,12 +239,18 @@ class Meta:
     date: str | None = None  # YYYY-MM-DD of the capture date, None = no date
     gps: bool = False
     readable: bool = True  # False = file format this script cannot look into
+    # for --list-files only:
+    when: str | None = None  # the date as stored, e.g. "2019-07-14 15:30:12 +02:00"
+    src: str | None = None  # where the date came from, e.g. "EXIF DateTimeOriginal"
+    where: tuple[float, float] | None = None  # latitude, longitude
+    camera: str | None = None
 
 
 QT_EPOCH = dt.datetime(1904, 1, 1, tzinfo=dt.timezone.utc)
-XMP_DATE = re.compile(rb'(?:exif:DateTimeOriginal|xmp:CreateDate)\s*(?:=\s*["\']|>)\s*(\d{4})-(\d{2})-(\d{2})')
-XMP_LAT = re.compile(rb'exif:GPSLatitude\s*(?:=\s*["\']|>)\s*\d')
-XMP_LON = re.compile(rb'exif:GPSLongitude\s*(?:=\s*["\']|>)\s*\d')
+XMP_DATE = re.compile(rb'(exif:DateTimeOriginal|xmp:CreateDate)\s*(?:=\s*["\']|>)\s*'
+                      rb'((\d{4})-(\d{2})-(\d{2})(?:T[\d:.]+)?(?:Z|[+-]\d{2}:\d{2})?)')
+XMP_LAT = re.compile(rb'exif:GPSLatitude\s*(?:=\s*["\']|>)\s*(\d[\d,.]*[NSns]?)')
+XMP_LON = re.compile(rb'exif:GPSLongitude\s*(?:=\s*["\']|>)\s*(\d[\d,.]*[EWew]?)')
 
 
 def valid_ymd(y, m, d) -> str | None:
@@ -248,13 +266,42 @@ def exif_date(raw: bytes) -> str | None:
     return valid_ymd(*m.groups()) if m else None
 
 
+def exif_when(raw: bytes, offset: bytes = b"") -> str:
+    """EXIF "2019:07:14 15:30:12" plus an OffsetTime "+02:00" -> "2019-07-14 15:30:12 +02:00"."""
+    t = raw.split(b"\0")[0].decode("ascii", "replace").strip()
+    t = t[:10].replace(":", "-") + t[10:]
+    off = offset.split(b"\0")[0].decode("ascii", "replace").strip()
+    return f"{t} {off}".strip()
+
+
 def merge(a: Meta, b: Meta) -> Meta:
-    return Meta(a.date or b.date, a.gps or b.gps, a.readable or b.readable)
+    first = a if a.date else b
+    return Meta(a.date or b.date, a.gps or b.gps, a.readable or b.readable, first.when, first.src,
+                a.where or b.where, a.camera or b.camera)
 
 
-def xmp_meta(data: bytes) -> Meta:
+def xmp_coord(text: bytes) -> float | None:
+    """XMP GPS: "64,8.796N", "64,8,47.8N" or "64.1466"."""
+    t = text.decode("ascii", "replace").strip()
+    sign = -1 if t[-1:] in "SsWw" else 1
+    try:
+        parts = [float(x) for x in t.rstrip("NSEWnsew").split(",")]
+    except ValueError:
+        return None
+    return sign * sum(v / 60 ** i for i, v in enumerate(parts[:3]))
+
+
+def xmp_meta(data: bytes, where: str = "XMP") -> Meta:
     m = XMP_DATE.search(data)
-    return Meta(valid_ymd(*m.groups()) if m else None, bool(XMP_LAT.search(data) and XMP_LON.search(data)))
+    lat, lon = XMP_LAT.search(data), XMP_LON.search(data)
+    meta = Meta(valid_ymd(*m.groups()[2:]) if m else None, bool(lat and lon))
+    if meta.date:
+        meta.when = m.group(2).decode().replace("T", " ")
+        meta.src = f"{where} {m.group(1).decode()}"
+    if lat and lon:
+        y, x = xmp_coord(lat.group(1)), xmp_coord(lon.group(1))
+        meta.where = (y, x) if y is not None and x is not None else None
+    return meta
 
 
 def tiff_meta(f, base: int) -> Meta:
@@ -305,12 +352,26 @@ def tiff_meta(f, base: int) -> Meta:
     exif, gps = ifd(pointer(ifd0, 0x8769)), ifd(pointer(ifd0, 0x8825))
     if not gps and 0x0002 in ifd0 and 0x0004 in ifd0:  # a bare GPS directory (Canon CR3's CMT4)
         gps = ifd0
-    date = None
-    for tags, tag in ((exif, 0x9003), (exif, 0x9004), (ifd0, 0x9003), (gps, 0x001D)):
-        if tag in tags and (date := exif_date(value(tags[tag]))):
+    meta = Meta()
+    for tags, tag, off_tag, name in ((exif, 0x9003, 0x9011, "EXIF DateTimeOriginal"),
+                                     (exif, 0x9004, 0x9012, "EXIF CreateDate"),
+                                     (ifd0, 0x9003, 0x9011, "EXIF DateTimeOriginal"),
+                                     (gps, 0x001D, None, "GPS date")):
+        if tag in tags and (date := exif_date(raw := value(tags[tag]))):
+            meta.date = date
+            offset = value(exif[off_tag]) if off_tag in exif else b""
+            meta.when, meta.src = exif_when(raw, offset), name
             break
-    has_gps = 0x0002 in gps and 0x0004 in gps and (degrees(gps[0x0002]) != 0 or degrees(gps[0x0004]) != 0)
-    return Meta(date, has_gps)
+    if 0x0002 in gps and 0x0004 in gps:
+        lat, lon = degrees(gps[0x0002]), degrees(gps[0x0004])
+        if lat != 0 or lon != 0:
+            ref = lambda t: value(gps[t])[:1] if t in gps else b""
+            meta.gps = True
+            meta.where = (-lat if ref(0x0001) in (b"S", b"s") else lat, -lon if ref(0x0003) in (b"W", b"w") else lon)
+    text = lambda t: value(ifd0[t]).split(b"\0")[0].decode("utf-8", "replace").strip() if t in ifd0 else ""
+    make, model = text(0x010F), text(0x0110)
+    meta.camera = (model if model.lower().startswith(make.lower().split(" ")[0]) else f"{make} {model}").strip() or None
+    return meta
 
 
 def jpeg_meta(f, start: int = 0) -> Meta:
@@ -411,20 +472,23 @@ def mp4_meta(f, start: int, end: int) -> Meta:
             v = f.read(4)[0]
             secs = int.from_bytes(f.read(8 if v == 1 else 4), "big")
             if secs > 67 * 365 * 86400:  # after 1971; 0 means "not set"
-                meta.date = (QT_EPOCH + dt.timedelta(seconds=secs)).date().isoformat()
+                t = QT_EPOCH + dt.timedelta(seconds=secs)
+                meta.date, meta.when, meta.src = t.date().isoformat(), t.strftime("%Y-%m-%d %H:%M:%S UTC"), "QuickTime CreateDate"
             break
     f.seek(start)
     moov = f.read(end - start)
     if not meta.date and b"com.apple.quicktime.creationdate" in moov:
         i = moov.find(b"com.apple.quicktime.creationdate")
-        m = re.search(rb"(\d{4})-(\d{2})-(\d{2})T", moov[i:])
-        meta.date = valid_ymd(*m.groups()) if m else None
+        m = re.search(rb"((\d{4})-(\d{2})-(\d{2})T[\d:]+(?:[+-]\d{2}:?\d{2}|Z)?)", moov[i:])
+        meta.date = valid_ymd(*m.groups()[1:]) if m else None
+        if meta.date:
+            meta.when, meta.src = m.group(1).decode().replace("T", " "), "QuickTime CreationDate"
     for key in (b"\xa9xyz", b"com.apple.quicktime.location.ISO6709"):
         i = moov.find(key)
         if i >= 0:
             m = re.search(rb"([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)", moov[i : i + 200])
             if m and (float(m.group(1)) != 0 or float(m.group(2)) != 0):
-                meta.gps = True
+                meta.gps, meta.where = True, (float(m.group(1)), float(m.group(2)))
     return meta
 
 
@@ -484,8 +548,10 @@ def read_meta(path: Path, sidecar: Path | None = None) -> Meta:
         meta = Meta(readable=False)
     if sidecar:
         try:
-            side = xmp_meta(sidecar.read_bytes()[: 4 * 1024 * 1024])
-            meta = Meta(meta.date or side.date, meta.gps or side.gps, meta.readable or bool(side.date))
+            side = xmp_meta(sidecar.read_bytes()[: 4 * 1024 * 1024], "sidecar")
+            readable = meta.readable or bool(side.date)
+            meta = merge(meta, side)
+            meta.readable = readable
         except OSError:
             pass
     return meta
@@ -767,59 +833,30 @@ def process(folder: Path, args, api: Immich, media_ext, sidecar_ext, log: Log) -
         print("  Nothing to upload.")
         return True
 
-    # 0. capture dates (and GPS when --place is given): stop before uploading files without a date
-    with concurrent.futures.ThreadPoolExecutor(args.jobs) as ex:
-        for m, md in zip(s.media, ex.map(lambda m: read_meta(m.path, m.sidecar), s.media)):
-            m.meta = md
-    undated = [m for m in s.media if not m.meta.date]
-    dates = sorted(m.meta.date for m in s.media if m.meta.date)
-    if dates:
-        print(f"  Taken {dates[0]}" + (f" to {dates[-1]}" if dates[-1] != dates[0] else "")
-              + (f"; {len(undated)} without a date" if undated else ""))
-    else:
-        print("  No file has a date")
-    for m in undated[:20]:
-        print(f"    no date: {m.rel}" + ("" if m.meta.readable else "  (file type not checked)"))
-    if len(undated) > 20:
-        print(f"    ... and {len(undated) - 20} more")
-    if undated and not args.date and not args.allow_undated:
-        print(f"  Stopped before uploading: Immich would date {'this file' if len(undated) == 1 else 'these files'} "
-              "by the file time. Set one with --date, or upload anyway with --allow-undated.")
+    # 1. checksums, 2. what Immich already has
+    in_immich(s.media, args, api)
+    by_id = {str(i): m for i, m in enumerate(s.media)}
+    todo = [m for m in s.media if m.state == "pending"]
+    existing = [m for m in s.media if m.state == "existing"]
+    print(f"  {len(existing)} already in Immich, {len(todo)} to upload")
+
+    # 3. dates and places. Files already in Immich keep theirs, unless --force (a re-upload) is given.
+    cands = [m for m in s.media if m.state != "failed"] if args.force else todo
+    if existing and not args.force and (args.date or args.place):
+        print(f"  The {files(len(existing))} already in Immich keep their date and place (--force to redo them).")
+    plan = meta_plan(cands, args)
+    if not plan_ok(plan, args):
+        print("  Skipped, nothing uploaded or changed.")
+        return False
+    if plan.stop:
+        print(f"  Stopped before uploading: Immich would date {'this file' if len(plan.undated) == 1 else 'these files'}"
+              " by the file time. Give a date with --date, or upload anyway with --allow-undated.")
         if not args.dry_run:
             log.record(folder, album=album, tags=[], files=len(s.media), new=0,
-                       status=f"stopped: {len(undated)} without date", deleted="no",
+                       status=f"stopped: {len(plan.undated)} without date", deleted="no",
                        now=dt.datetime.now().strftime("%Y-%m-%d %H:%M"))
             print(f"  Logged to {args.log}")
         return False
-    fix_date = undated if args.date else []
-    fix_place = [m for m in s.media if not m.meta.gps] if args.place else []
-    if args.date and not undated:
-        print("  Every file has a date; --date is not needed here.")
-    if fix_date:
-        print(f"  {'Will set' if not args.dry_run else 'Would set'} the date {args.date.isoformat()} on "
-              f"{files(len(fix_date))}" + (", one second apart in file name order" if len(fix_date) > 1 else ""))
-    if args.place:
-        print(f"  {files(len(fix_place))} without a location"
-              + (f": {'will' if not args.dry_run else 'would'} set {args.place_name}" if fix_place else ""))
-
-    # 1. checksums
-    prog = Progress(len(s.media), total, "checksums")
-    with concurrent.futures.ThreadPoolExecutor(args.jobs) as ex:
-        for m, h in zip(s.media, ex.map(lambda m: sha1(m.path), s.media)):
-            m.sha1 = h
-            prog.step(m.size)
-
-    # 2. what Immich already has
-    by_id = {str(i): m for i, m in enumerate(s.media)}
-    for cid, res in api.check([(cid, m.sha1) for cid, m in by_id.items()]).items():
-        m = by_id[cid]
-        if res["action"] == "reject" and res.get("reason") == "duplicate":
-            m.state, m.asset_id = "existing", res.get("assetId")
-        elif res["action"] == "reject":
-            m.state, m.error = "failed", f"rejected by Immich: {res.get('reason')}"
-    todo = [m for m in s.media if m.state == "pending"]
-    existing = sum(m.state == "existing" for m in s.media)
-    print(f"  {existing} already in Immich, {len(todo)} to upload")
 
     if args.dry_run:
         for m in todo[:20]:
@@ -893,11 +930,10 @@ def process(folder: Path, args, api: Immich, media_ext, sidecar_ext, log: Log) -
             problems.append(f"tags: {e}")
             tags_ok = False
 
-    # 7. date and place, on files that lack them (Immich keeps such edits even when it re-reads the file)
+    # 7. date and place, set in Immich; the files stay as they are, so their checksums still match
     meta_ok = True
-    if fix_date or fix_place:
-        meta_ok = set_date_place(api, args, [m for m in fix_date if m.state != "failed"],
-                                 [m for m in fix_place if m.state != "failed"], problems)
+    if plan.dates or plan.places:
+        meta_ok = set_date_place(api, args, plan, [m for m in s.media if m.state != "failed"], problems)
 
     new = sum(m.state == "new" for m in s.media)
     existing = sum(m.state == "existing" for m in s.media)
@@ -927,12 +963,138 @@ def process(folder: Path, args, api: Immich, media_ext, sidecar_ext, log: Log) -
     return verified_all
 
 
-def set_date_place(api: Immich, args, fix_date: list[MediaFile], fix_place: list[MediaFile], problems) -> bool:
-    """Set --date (one second apart, in file name order) and --place, then read them back from Immich."""
+# --------------------------------------------------------------------------- --date / --place, set in Immich
+
+# The photo and video types Immich takes (from its mime.ts), for --list-files without a server.
+MEDIA_EXT = set(
+    ".3fr .ari .arw .cap .cin .cr2 .cr3 .crw .dcr .dng .erf .fff .iiq .k25 .kdc .mrw .nef .nrw .orf .ori .pef "
+    ".psd .raf .raw .rw2 .rwl .sr2 .srf .srw .x3f .avif .bmp .gif .jfif .jpeg .jpg .png .webp .heic .heif .hif "
+    ".insp .jp2 .jpe .jxl .mpo .svg .tif .tiff .3gp .3gpp .avi .flv .insv .m2t .m2ts .m4v .mkv .mov .mp4 .mpe "
+    ".mpeg .mpg .mts .mxf .ts .vob .webm .wmv".split())
+
+
+def in_immich(media: list[MediaFile], args, api: Immich) -> None:
+    """Checksum every file and mark the ones Immich already has (state 'existing') or rejects ('failed')."""
+    prog = Progress(len(media), sum(m.size for m in media), "checksums")
+    with concurrent.futures.ThreadPoolExecutor(args.jobs) as ex:
+        for m, h in zip(media, ex.map(lambda m: sha1(m.path), media)):
+            m.sha1 = h
+            prog.step(m.size)
+    by_id = {str(i): m for i, m in enumerate(media)}
+    for cid, res in api.check([(cid, m.sha1) for cid, m in by_id.items()]).items():
+        m = by_id[cid]
+        if res["action"] == "reject" and res.get("reason") == "duplicate":
+            m.state, m.asset_id = "existing", res.get("assetId")
+        elif res["action"] == "reject":
+            m.state, m.error = "failed", f"rejected by Immich: {res.get('reason')}"
+
+
+def read_all(media: list[MediaFile], jobs: int) -> None:
+    with concurrent.futures.ThreadPoolExecutor(jobs) as ex:
+        for m, md in zip(media, ex.map(lambda m: read_meta(m.path, m.sidecar), media)):
+            m.meta = md
+
+
+@dataclass
+class MetaPlan:
+    cands: list[MediaFile]  # the files whose date/place count: to upload, or with --force all of them
+    undated: list[MediaFile]
+    nogps: list[MediaFile]
+    have_date: list[MediaFile]  # with --date, when some files have a date and others not
+    have_place: list[MediaFile]  # with --place, likewise
+    dates: dict[str, dt.datetime]  # rel -> date to set
+    places: set[str]  # rel of the files to get the place
+    stop: bool  # files without a date and neither --date nor --allow-undated
+
+
+def meta_plan(cands: list[MediaFile], args) -> MetaPlan:
+    read_all(cands, args.jobs)
+    undated = [m for m in cands if not m.meta.date]
+    nogps = [m for m in cands if not m.meta.gps]
+    set_date = (cands if args.force else undated) if args.date else []
+    dates = {}  # one second apart in file name order, so scans keep their order in the timeline
+    for m in sorted(set_date, key=lambda m: m.rel.lower()):
+        dates.setdefault(m.rel, args.date + dt.timedelta(seconds=len(dates)))
+    places = {m.rel for m in (cands if args.force else nogps)} if args.place else set()
+    have_date = [m for m in cands if m.meta.date] if args.date and undated else []
+    have_place = [m for m in cands if m.meta.gps] if args.place and nogps else []
+    stop = bool(undated) and not args.date and not args.allow_undated
+    return MetaPlan(cands, undated, nogps, have_date, have_place, dates, places, stop)
+
+
+def plan_ok(plan: MetaPlan, args) -> bool:
+    """Print the dates of the files to upload and what --date/--place will do; ask if that is mixed."""
+    dates = sorted(m.meta.date for m in plan.cands if m.meta.date)
+    if dates:
+        print(f"  Taken {dates[0]}" + (f" to {dates[-1]}" if dates[-1] != dates[0] else "")
+              + (f"; {len(plan.undated)} without a date" if plan.undated else ""))
+    elif plan.cands:
+        print("  No file has a date")
+    show("no date:", [m.rel + ("" if m.meta.readable else "  (file type not checked)") for m in plan.undated], 20)
+    if plan.stop:
+        return True
+    will = "Would set" if args.dry_run else "Will set"
+    if args.date:
+        if plan.dates:
+            over = sum(bool(m.meta.date) for m in plan.cands if m.rel in plan.dates)
+            print(f"  {will} the date {args.date.isoformat()} on {files(len(plan.dates))}"
+                  + (", one second apart in file name order" if len(plan.dates) > 1 else "")
+                  + (f" (--force: overwriting the date of {over})" if over else ""))
+        else:
+            print("  Every file to upload has a date; --date is not needed here.")
+    if args.place:
+        if plan.places:
+            over = sum(m.meta.gps for m in plan.cands if m.rel in plan.places)
+            print(f"  {will} the place {args.place_name} on {files(len(plan.places))}"
+                  + (f" (--force: overwriting the location of {over})" if over else ""))
+        else:
+            print("  Every file to upload has a location; --place is not needed here.")
+    if args.force or not (plan.have_date or plan.have_place):
+        return True
+    warn = []
+    if plan.have_date:
+        warn.append(f"{len(plan.have_date)} of {files(len(plan.cands))} already {'has' if len(plan.have_date) == 1 else 'have'} a date")
+        show("has a date:", [f"{m.rel}  ({m.meta.when or m.meta.date})" for m in plan.have_date])
+    if plan.have_place:
+        warn.append(f"{len(plan.have_place)} of {files(len(plan.cands))} already {'has' if len(plan.have_place) == 1 else 'have'} a location")
+        show("has a location:", [m.rel for m in plan.have_place])
+    if args.dry_run:
+        print(f"  ! {'; '.join(warn)}. Without --dry-run this asks first (--force: does not ask, "
+              "overwrites them too).")
+        return True
+    return confirm(f"{'; '.join(warn)}. Set the date/place only on the others?")
+
+
+def confirm(question: str) -> bool:
+    if not sys.stdin.isatty():
+        print(f"  ! {question} -> no (cannot ask: no terminal). Use --force to go ahead without asking.")
+        return False
+    try:
+        return input(f"  ! {question} [y/N] ").strip().lower() in ("y", "yes", "j", "ja")
+    except EOFError:
+        return False
+
+
+def show(label: str, items: list[str], limit: int = 10) -> None:
+    for x in items[:limit]:
+        print(f"    {label} {x}")
+    if len(items) > limit:
+        print(f"    ... and {len(items) - limit} more")
+
+
+def set_date_place(api: Immich, args, plan: MetaPlan, done: list[MediaFile], problems) -> bool:
+    """Set the planned dates and place in Immich, then read them back. Immich keeps such edits in its
+    database and an .xmp next to its copy; the original stays as it is."""
     want: dict[str, dict] = {}
-    for m in fix_date:
-        if m.asset_id not in want:  # the same photo twice in a folder gets one date
-            want[m.asset_id] = {"date": args.date + dt.timedelta(seconds=len(want)), "rel": m.rel}
+    place_ids = []
+    for m in done:
+        if not m.asset_id:
+            continue
+        if m.rel in plan.dates and m.asset_id not in want:  # the same photo twice in a folder gets one date
+            want[m.asset_id] = {"date": plan.dates[m.rel], "rel": m.rel}
+        if m.rel in plan.places and m.asset_id not in place_ids:
+            place_ids.append(m.asset_id)
+    rel = {m.asset_id: m.rel for m in done if m.asset_id}
     errors = []
 
     def put_date(item):
@@ -944,14 +1106,13 @@ def set_date_place(api: Immich, args, fix_date: list[MediaFile], fix_place: list
 
     with concurrent.futures.ThreadPoolExecutor(args.jobs) as ex:
         list(ex.map(put_date, want.items()))
-    place_ids = list(dict.fromkeys(m.asset_id for m in fix_place))
-    lat, lon = args.place
-    for i in range(0, len(place_ids), BATCH):
-        try:
-            api.request("PUT", "/assets", {"ids": place_ids[i : i + BATCH], "latitude": lat, "longitude": lon})
-        except ApiError as e:
-            errors.append(f"place not set on {len(place_ids[i:i + BATCH])} files ({e})")
-    rel = {m.asset_id: m.rel for m in fix_date + fix_place}
+    if place_ids:
+        lat, lon = args.place
+        for i in range(0, len(place_ids), BATCH):
+            try:
+                api.request("PUT", "/assets", {"ids": place_ids[i : i + BATCH], "latitude": lat, "longitude": lon})
+            except ApiError as e:
+                errors.append(f"place not set on {files(len(place_ids[i:i + BATCH]))} ({e})")
 
     def verify(aid):
         try:
@@ -966,8 +1127,8 @@ def set_date_place(api: Immich, args, fix_date: list[MediaFile], fix_place: list
                 ok = False
             if not ok:
                 return f"{rel[aid]}: date reads back as {got or 'nothing'}"
-        if aid in place_ids and not (abs((x.get("latitude") or 999) - lat) < 1e-4
-                                     and abs((x.get("longitude") or 999) - lon) < 1e-4):
+        if aid in place_ids and not (abs((x.get("latitude") or 999) - args.place[0]) < 1e-4
+                                     and abs((x.get("longitude") or 999) - args.place[1]) < 1e-4):
             return f"{rel[aid]}: location reads back as {x.get('latitude')}, {x.get('longitude')}"
         return None
 
@@ -976,8 +1137,9 @@ def set_date_place(api: Immich, args, fix_date: list[MediaFile], fix_place: list
             errors += [e for e in ex.map(verify, list(dict.fromkeys(list(want) + place_ids))) if e]
     problems += errors
     if not errors:
-        done = ([f"date on {files(len(want))}"] if want else []) + ([f"location on {files(len(place_ids))}"] if place_ids else [])
-        print(f"  Set and checked: {', '.join(done)}")
+        parts = ([f"date on {files(len(want))}"] if want else []) + ([f"location on {files(len(place_ids))}"] if place_ids else [])
+        if parts:
+            print(f"  Set in Immich and checked: {', '.join(parts)}")
     return not errors
 
 
@@ -1108,35 +1270,63 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description="Upload folders of photos and videos to Immich, verify them and log each folder.",
         epilog="Examples: immich-upload.py --dry-run -t Travel/Iceland \"D:\\Photos\\2019 Iceland\"   |   "
+               "immich-upload.py --date 1998-08 --place \"Rome, Italy\" \"D:\\Scans\\Rome 1998\"   |   "
                "immich-upload.py --list-albums --list-tags")
     ap.add_argument("folders", nargs="*", type=Path, metavar="FOLDER", help="folder(s) to upload, with subfolders")
     ap.add_argument("-l", "--list-albums", action="store_true",
                     help="list the albums in Immich and exit (uploads nothing)")
     ap.add_argument("--list-tags", action="store_true", help="list the tags in Immich and exit (uploads nothing)")
+    ap.add_argument("-L", "--list-files", action="store_true",
+                    help="list the local files in FOLDER(s) with their date, location and camera, and what an "
+                         "upload with the same options would do (with a server: which files Immich has); "
+                         "changes nothing")
     ap.add_argument("-a", "--album",
                     help="album name (default: the album the log has for the folder, else the folder's name)")
     ap.add_argument("-t", "--tag", action="append", default=[], metavar="TAG",
                     help="tag every file with TAG; repeat for more tags; nest with '/', e.g. Travel/Iceland. "
                          "Missing tags are created")
     ap.add_argument("--date", type=parse_date, metavar="DATE",
-                    help="date for files that have none, e.g. 2019-07-14, \"2019-07-14 15:30\", 2019-07 or 1987 "
-                         "(without a time: 12:00; without an offset: this computer's time zone)")
+                    help="set this date in Immich on the uploaded files that have none, e.g. 2019-07-14, "
+                         "\"2019-07-14 15:30\", 2019-07 or 1987 (without a time: 12:00; without an offset: "
+                         "this computer's time zone). Asks first if some files have a date and others not. "
+                         "Files already in Immich keep theirs")
     ap.add_argument("--place", metavar="PLACE",
-                    help="location for files that have none: \"64.1466, -21.9426\" or a place name, "
-                         "looked up on OpenStreetMap, e.g. \"Reykjavik, Iceland\"")
+                    help="set this location in Immich on the uploaded files that have none: "
+                         "\"64.1466, -21.9426\" or a place name, looked up on OpenStreetMap, e.g. "
+                         "\"Reykjavik, Iceland\". Asks like --date")
     ap.add_argument("--allow-undated", action="store_true",
                     help="upload files without a date anyway (Immich then uses the file time)")
     ap.add_argument("--delete", action="store_true",
                     help="delete the uploaded files and the folder once everything is verified")
     ap.add_argument("--log", type=Path, default=default_log(),
                     help=f"Markdown log of uploaded folders (default: {default_log()})")
-    ap.add_argument("-n", "--dry-run", action="store_true", help="only show what would be uploaded")
-    ap.add_argument("-f", "--force", action="store_true", help="redo folders the log lists as verified")
+    ap.add_argument("-n", "--dry-run", action="store_true", help="only show what would be uploaded or edited")
+    ap.add_argument("-f", "--force", action="store_true",
+                    help="redo folders the log lists as verified, as a re-upload: --date/--place then apply to "
+                         "every file, also those already in Immich, overwriting their date/place, without asking")
     ap.add_argument("-j", "--jobs", type=int, default=4, help="parallel uploads (default: 4)")
     ap.add_argument("--server", default=os.environ.get("IMMICH_URL"), help="Immich URL (or IMMICH_URL)")
     ap.add_argument("--api-key", default=os.environ.get("IMMICH_API_KEY"), help="API key (or IMMICH_API_KEY)")
     args = ap.parse_args()
 
+    if args.list_files:
+        folders = check_folders(ap, args)
+        if args.place:
+            lat, lon, args.place_name = parse_place(args.place)
+            args.place = (lat, lon)
+            print(f"Place: {args.place_name}")
+        api, media_ext, sidecar_ext = None, MEDIA_EXT, {".xmp"}
+        if args.server and args.api_key:
+            try:
+                api = Immich(args.server, args.api_key)
+                media_ext, sidecar_ext = api.media_types()
+            except (ApiError, OSError) as e:
+                print(f"Cannot ask Immich ({e}); listing the local files only.")
+                api = None
+        log = Log(args.log)
+        for f in folders:
+            list_files(f, args, log, api, media_ext, sidecar_ext)
+        return 0
     if not args.server or not args.api_key:
         ap.error("set the Immich URL and API key (IMMICH_URL / IMMICH_API_KEY or --server / --api-key)")
     if args.list_albums or args.list_tags:
@@ -1145,21 +1335,12 @@ def main() -> int:
         if args.list_albums and args.list_tags:
             print()
         return max(rc, list_tags(api) if args.list_tags else 0)
+    args.tag = list(dict.fromkeys(t.strip().strip("/") for t in args.tag if t.strip().strip("/")))
+    folders = check_folders(ap, args)
     if args.place:
         lat, lon, args.place_name = parse_place(args.place)
         args.place = (lat, lon)
         print(f"Place: {args.place_name}")
-    args.tag = list(dict.fromkeys(t.strip().strip("/") for t in args.tag if t.strip().strip("/")))
-    if not args.folders:
-        ap.error("give at least one FOLDER (or --list-albums)")
-    args.jobs = max(1, args.jobs)
-    args.log = args.log.expanduser().resolve()
-    folders = []
-    for f in args.folders:
-        f = f.expanduser().resolve()
-        if not f.is_dir():
-            ap.error(f"not a folder: {f}")
-        folders.append(f)
     if args.album is None and len({f.name for f in folders}) < len(folders):
         print("Note: some folders share a name, so they will share an album.")
 
@@ -1200,6 +1381,93 @@ def main() -> int:
             print(f"  Immich error, folder not finished: {e}")
             ok = False
     return 0 if ok else 1
+
+
+def list_files(folder: Path, args, log: Log, api: Immich | None, media_ext, sidecar_ext) -> None:
+    """--list-files: each file with its date, place and camera, and what a run with the same options would do."""
+    s = scan(folder, media_ext, sidecar_ext)
+    read_all(s.media, args.jobs)
+    row = log.get(folder)
+    print(f"\n== {folder}")
+    if row:
+        print(f"  Log: {row.get('Status')}, {row.get('Uploaded')} of {row.get('Files')} files uploaded by this "
+              f"script, album '{row.get('Album')}', last run {row.get('Last run')}")
+    skip = (row and row.get("Status") == "verified" and row.get("Files") == str(len(s.media))
+            and not (args.force or args.delete))
+    if api and s.media and not skip:
+        in_immich(s.media, args, api)
+    cands = [m for m in s.media if m.state != "failed"] if args.force else [m for m in s.media if m.state == "pending"]
+    plan = meta_plan(cands, args)
+
+    def what(m: MediaFile) -> str:
+        if skip:
+            return "skip (verified)"
+        if m.state == "failed":
+            return m.error
+        out = ["in Immich" if m.state == "existing" else "upload"]
+        if m not in plan.cands:
+            return "in Immich, left as is"
+        if plan.stop:
+            return "NO DATE: stops the folder" if not m.meta.date else "ok, but the folder stops"
+        if m.rel in plan.dates:
+            out.append(f"{'overwrite' if m.meta.date else 'set'} date {plan.dates[m.rel]:%Y-%m-%d %H:%M:%S}")
+        elif not m.meta.date:
+            out.append("no date")
+        if m.rel in plan.places:
+            out.append(f"{'overwrite' if m.meta.gps else 'set'} place")
+        return ", ".join(out)
+
+    def place(meta: Meta) -> str:
+        if meta.where:
+            return f"{meta.where[0]:.5f}, {meta.where[1]:.5f}"
+        return "yes" if meta.gps else "-"
+
+    rows = [["File", "Size", "Taken", "Date from", "Location", "Camera", "Plan"]]
+    for m in s.media:
+        taken = m.meta.when or ("-" if m.meta.readable else "(not checked)")
+        rows.append([m.rel + (" +xmp" if m.sidecar else ""), human(m.size), taken, m.meta.src or "-",
+                     place(m.meta), m.meta.camera or "-", what(m)])
+    if len(rows) > 1:
+        widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+        for n, r in enumerate(rows):
+            line = "  ".join(c.rjust(w) if i == 1 and n else c.ljust(w) for i, (c, w) in enumerate(zip(r, widths)))
+            print("  " + line.rstrip())
+            if n == 0:
+                print("  " + "  ".join("-" * w for w in widths))
+    for p in s.other:
+        print(f"  not a photo/video, not uploaded: {p.relative_to(folder)}")
+    for p in s.junk:
+        print(f"  system junk, deleted by --delete: {p.relative_to(folder)}")
+
+    summary = f"  {files(len(s.media))} ({human(sum(m.size for m in s.media))})"
+    if skip:
+        summary += "; skipped (verified in the log, use --force to redo)"
+    else:
+        if api:
+            summary += f", {sum(m.state == 'existing' for m in s.media)} already in Immich"
+        summary += f"; of the {files(len(plan.cands))} {'checked (--force)' if args.force else 'to upload'}: " \
+                   f"{len(plan.undated)} without a date, {len(plan.nogps)} without a location"
+        if plan.stop:
+            summary += "; the upload stops here (use --date, or --allow-undated)"
+        elif (plan.have_date or plan.have_place) and not args.force:
+            summary += "; asks first, as some have a date/place and others not"
+    print(summary)
+    if not api and not skip:
+        print("  (Not checked which files Immich already has: no server set. They would be left as they are.)")
+
+
+def check_folders(ap, args) -> list[Path]:
+    if not args.folders:
+        ap.error("give at least one FOLDER")
+    args.jobs = max(1, args.jobs)
+    args.log = args.log.expanduser().resolve()
+    folders = []
+    for f in args.folders:
+        f = f.expanduser().resolve()
+        if not f.is_dir():
+            ap.error(f"not a folder: {f}")
+        folders.append(f)
+    return folders
 
 
 if __name__ == "__main__":
