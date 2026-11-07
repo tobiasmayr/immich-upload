@@ -47,12 +47,16 @@ files Immich already has.
 Needs only the Python standard library (3.9+), so it runs on Linux and Windows.
 
 Settings come from the command line or these environment variables:
-  IMMICH_URL         e.g. https://photos.example.org
-  IMMICH_API_KEY     permissions: asset.upload, asset.read, album.read,
-                     album.create, albumAsset.create; for --tag also
-                     tag.read, tag.create, tag.asset; for --date or
-                     --place also asset.update
-  IMMICH_UPLOAD_LOG  path of the Markdown log (optional)
+  IMMICH_URL           e.g. https://photos.example.org
+  IMMICH_API_KEY       permissions: asset.upload, asset.read, album.read,
+                       album.create, albumAsset.create; for --tag also
+                       tag.read, tag.create, tag.asset; for --date or
+                       --place also asset.update
+  IMMICH_API_KEY_FILE  a file holding the key instead (see --api-key-file)
+  IMMICH_UPLOAD_LOG    path of the Markdown log (optional)
+
+Without any of these, the key is read from immich-upload/api-key in the user's
+config folder (~/.config on Linux, %APPDATA% on Windows), if that file exists.
 """
 
 from __future__ import annotations
@@ -648,6 +652,44 @@ def human(n: float) -> str:
 
 
 # --------------------------------------------------------------------------- log
+
+
+def default_key_file() -> Path:
+    if os.name == "nt":
+        base = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    return base / "immich-upload" / "api-key"
+
+
+def read_key_file(path: Path, ap) -> str:
+    """The API key from a file: its first line, spaces stripped. Warns if others may read it."""
+    path = path.expanduser()
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except OSError as e:
+        ap.error(f"cannot read the API key file {path}: {e.strerror or e}")
+    key = (text.strip().splitlines() or [""])[0].strip()
+    if not key:
+        ap.error(f"the API key file {path} is empty")
+    if os.name != "nt" and path.stat().st_mode & 0o077:
+        print(f"Warning: others on this computer can read {path}. Fix with: chmod 600 '{path}'", file=sys.stderr)
+    return key
+
+
+def api_key(args, ap) -> str | None:
+    """--api-key, --api-key-file, IMMICH_API_KEY, IMMICH_API_KEY_FILE, then the default key file."""
+    if args.api_key and args.api_key_file:
+        ap.error("give either --api-key or --api-key-file, not both")
+    if args.api_key:
+        return args.api_key
+    if args.api_key_file:
+        return read_key_file(Path(args.api_key_file), ap)
+    if os.environ.get("IMMICH_API_KEY"):
+        return os.environ["IMMICH_API_KEY"]
+    if os.environ.get("IMMICH_API_KEY_FILE"):
+        return read_key_file(Path(os.environ["IMMICH_API_KEY_FILE"]), ap)
+    return read_key_file(default_key_file(), ap) if default_key_file().is_file() else None
 
 
 def default_log() -> Path:
@@ -1496,8 +1538,12 @@ def main() -> int:
                          "every file, also those already in Immich, overwriting their date/place, without asking")
     ap.add_argument("-j", "--jobs", type=int, default=4, help="parallel uploads (default: 4)")
     ap.add_argument("--server", default=os.environ.get("IMMICH_URL"), help="Immich URL (or IMMICH_URL)")
-    ap.add_argument("--api-key", default=os.environ.get("IMMICH_API_KEY"), help="API key (or IMMICH_API_KEY)")
+    ap.add_argument("--api-key", help="API key (or IMMICH_API_KEY). Visible to others in the process list: "
+                                      "prefer --api-key-file")
+    ap.add_argument("--api-key-file", metavar="FILE",
+                    help=f"file holding the API key (or IMMICH_API_KEY_FILE; default: {default_key_file()}, if it exists)")
     args = ap.parse_args()
+    args.api_key = api_key(args, ap)
     args.date, args.date_prec = args.date or (None, 0)
 
     if args.list_files:
@@ -1519,7 +1565,8 @@ def main() -> int:
             list_files(f, args, log, api, media_ext, sidecar_ext)
         return 0
     if not args.server or not args.api_key:
-        ap.error("set the Immich URL and API key (IMMICH_URL / IMMICH_API_KEY or --server / --api-key)")
+        ap.error("set the Immich URL (IMMICH_URL or --server) and the API key (a key file, see --api-key-file, "
+                 "or IMMICH_API_KEY)")
     if args.list_albums or args.list_tags:
         api = Immich(args.server, args.api_key)
         rc = list_albums(api) if args.list_albums else 0

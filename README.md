@@ -15,7 +15,6 @@ Immich v3 API.
 
 ```sh
 export IMMICH_URL=https://photos.example.org   # Windows: setx IMMICH_URL ..., then a new terminal
-export IMMICH_API_KEY=...
 
 immich-upload.py -L FOLDER            # look first: each file's date, place and what would happen
 immich-upload.py FOLDER               # upload into an album named after the folder
@@ -33,6 +32,27 @@ Create the API key in Immich under **Account Settings → API Keys** with these 
 - `tag.create` (only for `--tag`)
 - `tag.read` (only for `--tag`)
 - `tag.asset` (only for `--tag`)
+
+Save the key in a file only you can read. The script reads it from this default path
+by itself, and the key never shows up in your shell history or the process list:
+
+- Linux: `~/.config/immich-upload/api-key` (or `$XDG_CONFIG_HOME/immich-upload/api-key`)
+- Windows: `%APPDATA%\immich-upload\api-key`
+
+```sh
+mkdir -p ~/.config/immich-upload
+(umask 077; read -rsp "API key: " k && printf '%s\n' "$k" > ~/.config/immich-upload/api-key)
+```
+
+```powershell
+# Windows (PowerShell)
+$k = Read-Host "API key" -AsSecureString
+New-Item -Force -ItemType Directory "$env:APPDATA\immich-upload" | Out-Null
+[Net.NetworkCredential]::new("", $k).Password | Set-Content -Encoding ascii "$env:APPDATA\immich-upload\api-key"
+```
+
+For a key file somewhere else, use `--api-key-file FILE` or `IMMICH_API_KEY_FILE`. `IMMICH_API_KEY` and
+`--api-key` work too, but are easier to leak.
 
 `-L` shows what a run with the same options would do (with a server set, it also checks
 which files Immich has):
@@ -59,6 +79,7 @@ zerodate.jpg  397 B  -                    -                      -              
 | `-n` | dry run |
 | `-f` | force: redo a verified folder as a re-upload (see below) |
 | `-L`, `--list-albums`, `--list-tags` | list local files, albums or tags; changes nothing |
+| `--api-key-file FILE` | read the API key from FILE instead of the default path |
 
 `immich-upload.py -h` shows all options.
 

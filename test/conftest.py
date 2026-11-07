@@ -23,6 +23,16 @@ def load_script():
 iu = load_script()
 
 
+@pytest.fixture(autouse=True)
+def own_config_dir(monkeypatch, tmp_path):
+    """Each test gets an empty config folder, so a real key file on this machine is never read."""
+    cfg = tmp_path / "config"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg))
+    monkeypatch.setenv("APPDATA", str(cfg))
+    monkeypatch.delenv("IMMICH_API_KEY_FILE", raising=False)
+    return cfg
+
+
 @pytest.fixture
 def mod():
     return iu
@@ -64,7 +74,9 @@ class Run:
             rc = iu.main()
         except SystemExit as e:
             rc = e.code if isinstance(e.code, int) else 2
-        return rc, self.capsys.readouterr().out
+        out = self.capsys.readouterr()
+        self.err = out.err  # warnings and errors
+        return rc, out.out
 
 
 @pytest.fixture
