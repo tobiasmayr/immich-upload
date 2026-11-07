@@ -6,7 +6,7 @@ collection over bit by bit, with the option to delete each folder once it is saf
 Immich.
 
 One Python file, standard library only (Python 3.9+). Works on Linux and Windows.
-Written for and tested against the Immich v3.3.6 API.
+Written for the Immich v3 API (v3.3.6).
 
 ## Setup
 
@@ -166,14 +166,6 @@ real Documents folder, on Linux the XDG documents folder. Set `--log` or
 | 2 | setup problem: server not reachable, key refused |
 | 130 | interrupted with Ctrl-C |
 
-## Tests
+## Contributing
 
-The tests use [pytest](https://pytest.org) and need no Immich server: they generate tiny
-photo and video files with exactly the metadata each test needs, and run the script
-against a fake Immich API in the same process (`test/fake_immich.py`).
-
-```sh
-python3 -m venv .venv
-.venv/bin/pip install pytest
-.venv/bin/pytest test
-```
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how the script is built and how to run the tests.
