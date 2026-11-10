@@ -12,8 +12,9 @@ For what the script does, see the [README](README.md).
   files: an edited file gets a new checksum, so Immich would store it a second time, and
   sync tools (Dropbox, Nextcloud, ...) would spread the edit.
 - **Delete only what is verified.** `--delete` runs only when every file of the folder
-  is in Immich under its exact checksum and not in the trash, and album, tags and
-  date/place all worked. It removes media, their sidecars and known junk, never other
+  is in Immich under its exact checksum and not in the trash (unless `--trashed-ok`
+  says the trashed ones were deleted on purpose), and album, tags and date/place all
+  worked. It removes media, their sidecars and known junk, never other
   files.
 - **Files already in Immich are left alone**, unless `--force` is given (a re-upload).
 - **Ask before guessing.** When a date would be applied to a folder where some files

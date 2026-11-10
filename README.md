@@ -83,6 +83,7 @@ set, it also checks the key and which files Immich has; without one, it works of
 | `--place PLACE` | place for files without GPS: `"41.9, 12.5"` or a name, looked up on OpenStreetMap |
 | `--allow-undated` | upload files without a date anyway |
 | `--restore-trashed` | restore files whose copy in Immich is in the trash (else they count as failed) |
+| `--trashed-ok` | accept files in Immich's trash as deleted on purpose; `--delete` then removes them locally too |
 | `--delete` | delete uploaded files, sidecars and junk once all is verified; other files stay |
 | `-n` (or `-L`) | dry run: list the files and what would happen; changes nothing |
 | `--recheck` | check a verified folder against Immich again; dates and places stay |

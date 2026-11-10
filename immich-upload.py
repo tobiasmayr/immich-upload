@@ -39,6 +39,11 @@ For each folder given:
 it uploads what Immich lacks and adds everything to the album and tags, but
 leaves the dates and places of files already in Immich alone.
 
+A file whose copy in Immich is in the trash counts as failed, so the folder
+is not verified and --delete keeps it. --restore-trashed takes such copies out
+of the trash; --trashed-ok accepts them as deleted on purpose: they count as
+done (not added to the album), and --delete removes them locally too.
+
 --force redoes a folder as a re-upload: also verified folders, and --date /
 --place then apply to every file, also those already in Immich, overwriting
 dates and places they have, without asking.
@@ -867,12 +872,17 @@ class Progress:
                     print()
 
 
+def verified(row: dict) -> bool:
+    """The log row says the folder checked out ("verified", maybe with a note like ", 3 in the trash")."""
+    return (row.get("Status") or "").split(",")[0] == "verified"
+
+
 def process(folder: Path, args, api: Immich, media_ext, sidecar_ext, log: Log) -> bool:
     row = log.get(folder)
     album = args.album or (row or {}).get("Album") or folder.name  # a rerun keeps the folder's album
     print(f"\n== {folder}  ->  album '{album}'" + (f", tags {', '.join(args.tag)}" if args.tag else ""))
     s = scan(folder, media_ext, sidecar_ext)
-    if row and row.get("Status") == "verified" and not (args.force or args.recheck or args.delete):
+    if row and verified(row) and not (args.force or args.recheck or args.delete):
         if row.get("Files") == str(len(s.media)):
             print(f"  Already uploaded and verified ({row['Files']} files, see the log). "
                   "Skipping; --recheck to check it against Immich again.")
@@ -898,10 +908,11 @@ def process(folder: Path, args, api: Immich, media_ext, sidecar_ext, log: Log) -
     trashed = [m for m in s.media if m.trashed]
     print(f"  {len(existing)} already in Immich, {len(todo)} to upload"
           + (f"; {len(trashed)} of the files in Immich {'is' if len(trashed) == 1 else 'are'} in the trash"
-             + (", will restore" if args.restore_trashed else " (--restore-trashed to restore)") if trashed else ""))
+             + (", will restore" if args.restore_trashed else ", left there (--trashed-ok)" if args.trashed_ok
+                else " (--restore-trashed to restore, --trashed-ok to accept)") if trashed else ""))
 
     # 3. dates and places. Files already in Immich keep theirs, unless --force (a re-upload) is given.
-    cands = [m for m in s.media if m.state != "failed"] if args.force else todo
+    cands = [m for m in s.media if m.state in ("existing", "pending")] if args.force else todo
     if existing and not args.force and (args.date or args.place):
         print(f"  The {files(len(existing))} already in Immich keep their date and place (--force to redo them).")
     plan = meta_plan(cands, args, folder, s.media)
@@ -945,14 +956,15 @@ def process(folder: Path, args, api: Immich, media_ext, sidecar_ext, log: Log) -
     # 4. verify: every checksum must now map to the asset we have, and not be in the trash
     problems = []
     ok_ids = []
-    for cid, res in api.check([(cid, m.sha1) for cid, m in by_id.items() if m.state != "failed"]).items():
+    for cid, res in api.check([(cid, m.sha1) for cid, m in by_id.items() if m.state not in ("failed", "trashed")]).items():
         m = by_id[cid]
         if res["action"] != "reject" or res.get("reason") != "duplicate":
             m.state, m.error = "failed", "not found in Immich after upload"
         elif m.asset_id and res.get("assetId") != m.asset_id:
             m.state, m.error = "failed", f"checksum belongs to another asset ({res.get('assetId')})"
         elif res.get("isTrashed"):
-            m.state, m.error = "failed", "in the trash: restore it in Immich, or use --restore-trashed"
+            m.trashed = True
+            m.state, m.error = ("trashed", "") if args.trashed_ok else ("failed", "in the trash: restore it in Immich, or use --restore-trashed (--trashed-ok if it was deleted on purpose)")
         else:
             m.asset_id = res.get("assetId") or m.asset_id
             ok_ids.append(m.asset_id)
@@ -985,13 +997,15 @@ def process(folder: Path, args, api: Immich, media_ext, sidecar_ext, log: Log) -
     # 7. date and place, set in Immich; the files stay as they are, so their checksums still match
     meta_ok = True
     if plan.dates or plan.places:
-        meta_ok = set_date_place(api, args, plan, [m for m in s.media if m.state != "failed"], problems)
+        meta_ok = set_date_place(api, args, plan, [m for m in s.media if m.state in ("new", "existing")], problems)
 
     new = sum(m.state == "new" for m in s.media)
     existing = sum(m.state == "existing" for m in s.media)
     failed = sum(m.state == "failed" for m in s.media)
+    in_trash = sum(m.state == "trashed" for m in s.media)
     verified_all = failed == 0 and album_ok and tags_ok and meta_ok
-    print(f"  Result: {new} uploaded, {existing} already in Immich, {failed} failed"
+    print(f"  Result: {new} uploaded, {existing} already in Immich, "
+          + (f"{in_trash} in the trash (accepted), " if in_trash else "") + f"{failed} failed"
           + ("" if album_ok else ", album incomplete") + ("" if tags_ok else ", tags not set")
           + ("" if meta_ok else ", date/place not set"))
     for p in problems[:30]:
@@ -1006,7 +1020,7 @@ def process(folder: Path, args, api: Immich, media_ext, sidecar_ext, log: Log) -
     elif args.delete:
         deleted = delete(folder, s)
 
-    status = ("verified" if verified_all else f"{failed} failed" if failed
+    status = ((f"verified, {in_trash} in the trash" if in_trash else "verified") if verified_all else f"{failed} failed" if failed
               else "album incomplete" if not album_ok else "tags not set" if not tags_ok
               else "date/place not set")
     log.record(folder, album=album, tags=args.tag, files=len(s.media), new=new, status=status,
@@ -1037,8 +1051,10 @@ def in_immich(media: list[MediaFile], args, api: Immich) -> None:
         m = by_id[cid]
         if res["action"] == "reject" and res.get("reason") == "duplicate":
             m.state, m.asset_id, m.trashed = "existing", res.get("assetId"), bool(res.get("isTrashed"))
-            if m.trashed and not args.restore_trashed:
-                m.state, m.error = "failed", "in the trash: restore it in Immich, or use --restore-trashed"
+            if m.trashed and args.trashed_ok:
+                m.state = "trashed"
+            elif m.trashed and not args.restore_trashed:
+                m.state, m.error = "failed", "in the trash: restore it in Immich, or use --restore-trashed (--trashed-ok if it was deleted on purpose)"
         elif res["action"] == "reject":
             m.state, m.error = "failed", f"rejected by Immich: {res.get('reason')}"
 
@@ -1544,6 +1560,9 @@ def main() -> int:
     ap.add_argument("--restore-trashed", action="store_true",
                     help="restore files whose copy in Immich is in the trash (else they count as failed); "
                          "the API key needs asset.delete")
+    ap.add_argument("--trashed-ok", action="store_true",
+                    help="accept files whose copy in Immich is in the trash as deleted on purpose: they count as "
+                         "done, are not added to the album, and --delete removes them locally too")
     ap.add_argument("--allow-undated", action="store_true",
                     help="upload files without a date anyway (Immich then uses the file time)")
     ap.add_argument("--delete", action="store_true",
@@ -1568,6 +1587,8 @@ def main() -> int:
     args = ap.parse_args()
     args.api_key = api_key(args, ap)
     args.date, args.date_prec = args.date or (None, 0)
+    if args.restore_trashed and args.trashed_ok:
+        ap.error("--restore-trashed and --trashed-ok exclude each other: restore the files, or accept them as deleted")
 
     if args.dry_run or args.list_files:
         return preview_main(ap, args)
@@ -1644,11 +1665,12 @@ def preview(folder: Path, args, log: Log, api: Immich | None, media_ext, sidecar
     if row:
         print(f"  Log: {row.get('Status')}, {row.get('Uploaded')} of {row.get('Files')} files uploaded by this "
               f"script, last run {row.get('Last run')}")
-    skip = (row and row.get("Status") == "verified" and row.get("Files") == str(len(s.media))
+    skip = (row and verified(row) and row.get("Files") == str(len(s.media))
             and not (args.force or args.recheck or args.delete))
     if api and s.media and not skip:
         in_immich(s.media, args, api)
-    cands = [m for m in s.media if m.state != "failed"] if args.force else [m for m in s.media if m.state == "pending"]
+    cands = ([m for m in s.media if m.state in ("existing", "pending")] if args.force
+             else [m for m in s.media if m.state == "pending"])
     plan = meta_plan(cands, args, folder, s.media)
 
     def what(m: MediaFile) -> str:
@@ -1656,6 +1678,8 @@ def preview(folder: Path, args, log: Log, api: Immich | None, media_ext, sidecar
             return "skip (verified)"
         if m.state == "failed":
             return m.error
+        if m.state == "trashed":
+            return "in the trash: accepted as deleted" + (", --delete removes it" if args.delete else "")
         if m.state == "existing":
             out = ["in Immich" + (", restore from the trash" if m.trashed else "")
                    + ", add to album" + (" and tags" if args.tag else "")]
@@ -1724,8 +1748,11 @@ def preview(folder: Path, args, log: Log, api: Immich | None, media_ext, sidecar
     restore = sum(m.trashed and m.state == "existing" for m in s.media)
     in_trash = sum(m.trashed and m.state == "failed" for m in s.media)
     rejected = len(failed) - in_trash
+    accepted = sum(m.state == "trashed" for m in s.media)
     print(line + (f", {restore} of them to restore from the trash" if restore else "")
-          + (f", {in_trash} in the trash (--restore-trashed would restore {'it' if in_trash == 1 else 'them'})"
+          + (f", {accepted} in the trash, accepted (--trashed-ok)" if accepted else "")
+          + (f", {in_trash} in the trash (--restore-trashed would restore {'it' if in_trash == 1 else 'them'}, "
+             "--trashed-ok would accept " + ('it' if in_trash == 1 else 'them') + ")"
              if in_trash else "") + (f", {rejected} rejected" if rejected else ""))
     counted = "of them" if not args.force else "with --force, of all"
 

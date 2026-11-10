@@ -129,6 +129,44 @@ def test_restore_waits_for_the_question(run, immich, folder):
     assert rc == 1 and immich.by_name("a.jpg")["trashed"]  # said no: nothing changed
 
 
+def test_trashed_ok_lets_delete_remove_the_folder(run, immich, folder):
+    photo(folder, "a.jpg", "2019:07:14 15:30:00")
+    photo(folder, "b.jpg", "2019:07:14 16:00:00")
+    run(folder)
+    immich.by_name("b.jpg")["trashed"] = True  # deleted in Immich on purpose
+    rc, out = run(folder, "--recheck", "--delete")
+    assert rc == 1 and "--trashed-ok" in out and folder.exists()
+    rc, out = run(folder, "--trashed-ok", "--delete")
+    assert rc == 0 and "1 in the trash (accepted)" in out and not folder.exists()
+    assert immich.by_name("b.jpg")["trashed"]  # left in the trash
+    assert "| verified, 1 in the trash | yes |" in run.log.read_text()
+
+
+def test_trashed_ok_keeps_trashed_files_out_of_the_album(run, immich, folder):
+    p = photo(folder, "a.jpg", "2019:07:14 15:30:00")
+    photo(folder, "b.jpg", "2019:07:14 16:00:00")
+    a = immich.add(p.read_bytes(), "a.jpg", trashed=True)
+    rc, out = run(folder, "--trashed-ok")
+    assert rc == 0 and a["id"] not in immich.album("Iceland")["ids"]
+    assert len(immich.album("Iceland")["ids"]) == 1
+    rc, out = run(folder)  # "verified, 1 in the trash" still counts as verified
+    assert "Already uploaded and verified" in out
+
+
+def test_trashed_ok_and_restore_exclude_each_other(run, immich, folder):
+    photo(folder, "a.jpg", "2019:07:14 15:30:00")
+    rc, out = run(folder, "--trashed-ok", "--restore-trashed")
+    assert rc == 2 and "exclude each other" in run.err
+
+
+def test_dry_run_trashed_ok(run, immich, folder):
+    p = photo(folder, "a.jpg", "2019:07:14 15:30:00")
+    immich.add(p.read_bytes(), "a.jpg", trashed=True)
+    rc, out = run(folder, "-n", "--trashed-ok", "--delete")
+    assert rc == 0 and "accepted as deleted, --delete removes it" in out
+    assert "1 in the trash, accepted" in out and "--delete: once all 1 are verified" in out
+
+
 def test_dry_run_shows_trash_and_album(run, immich, folder):
     t = photo(folder, "trashed.jpg", "2019:07:14 15:30:00")
     e = photo(folder, "elsewhere.jpg", "2019:07:14 15:30:00")
@@ -138,7 +176,7 @@ def test_dry_run_shows_trash_and_album(run, immich, folder):
     assert rc == 1
     assert "in the trash: restore it in Immich, or use --restore-trashed" in out
     assert "in Immich, add to album and tags" in out
-    assert "1 in the trash (--restore-trashed would restore it)" in out
+    assert "1 in the trash (--restore-trashed would restore it, --trashed-ok would accept it)" in out
     assert "--delete: nothing, as not every file would check out" in out
     rc, out = run("-n", "--restore-trashed", folder)
     assert rc == 0 and "in Immich, restore from the trash, add to album" in out
