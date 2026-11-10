@@ -85,6 +85,7 @@ set, it also checks the key and which files Immich has; without one, it works of
 | `--restore-trashed` | restore files whose copy in Immich is in the trash (else they count as failed) |
 | `--delete` | delete uploaded files, sidecars and junk once all is verified; other files stay |
 | `-n` (or `-L`) | dry run: list the files and what would happen; changes nothing |
+| `--recheck` | check a verified folder against Immich again; dates and places stay |
 | `-f` | force: redo a verified folder as a re-upload (see below) |
 | `--list-albums`, `--list-tags` | list the albums or tags in Immich |
 | `--api-key-file FILE` | read the API key from FILE instead of the default path |
@@ -92,8 +93,9 @@ set, it also checks the key and which files Immich has; without one, it works of
 `immich-upload.py -h` shows all options.
 
 A run is safe to repeat or interrupt. A folder logged as verified is skipped, unless
-its number of files changed. Files Immich already has are not sent again, but are added
-to the album and tagged.
+its number of files changed or `--recheck` is given, for example after files were
+deleted in Immich. Files Immich already has are not sent again, but are added to the
+album and tagged.
 
 ## Dates and places
 

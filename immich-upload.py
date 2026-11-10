@@ -29,11 +29,15 @@ For each folder given:
      not changed, so a later run still finds them by checksum.
   6. Record the folder in a Markdown log, one row per folder, updated on every
      run. A folder logged as verified is skipped next time, unless its number
-     of files changed.
+     of files changed or --recheck is given.
   7. With --delete, and only when every file checked out, delete the
      uploaded files, their sidecars and system junk (Thumbs.db, desktop.ini,
      ...), then the folder if nothing else is left in it. Other files are
      kept and listed.
+
+--recheck checks a verified folder against Immich again, like a first run:
+it uploads what Immich lacks and adds everything to the album and tags, but
+leaves the dates and places of files already in Immich alone.
 
 --force redoes a folder as a re-upload: also verified folders, and --date /
 --place then apply to every file, also those already in Immich, overwriting
@@ -91,7 +95,7 @@ LOG_NAME = "immich-uploads.md"
 LOG_INTRO = (
     "# Immich uploads\n\n"
     "Folders uploaded with `immich-upload.py`, one row per folder. A `verified` folder\n"
-    "is skipped on the next run unless its number of files changed or `--force` is given.\n"
+    "is skipped on the next run unless its number of files changed or `--recheck` is given.\n"
     "\"Uploaded\" counts the files this script sent for the folder over all runs.\n"
 )
 LOG_COLUMNS = ["Folder", "Album", "Tags", "Files", "Uploaded", "Status", "Deleted", "First run", "Last run"]
@@ -868,10 +872,10 @@ def process(folder: Path, args, api: Immich, media_ext, sidecar_ext, log: Log) -
     album = args.album or (row or {}).get("Album") or folder.name  # a rerun keeps the folder's album
     print(f"\n== {folder}  ->  album '{album}'" + (f", tags {', '.join(args.tag)}" if args.tag else ""))
     s = scan(folder, media_ext, sidecar_ext)
-    if row and row.get("Status") == "verified" and not (args.force or args.delete):
+    if row and row.get("Status") == "verified" and not (args.force or args.recheck or args.delete):
         if row.get("Files") == str(len(s.media)):
             print(f"  Already uploaded and verified ({row['Files']} files, see the log). "
-                  "Skipping; use --force to redo.")
+                  "Skipping; --recheck to check it against Immich again.")
             return True
         print(f"  Verified before with {row.get('Files')} files, now {len(s.media)}: checking again.")
 
@@ -1549,6 +1553,9 @@ def main() -> int:
     ap.add_argument("-n", "--dry-run", action="store_true",
                     help="change nothing: list each file with its date, location and camera, and what a run with "
                          "the same options would do (with a server set: also which files Immich has)")
+    ap.add_argument("--recheck", action="store_true",
+                    help="check folders the log lists as verified against Immich again: upload what is missing, "
+                         "add all to the album and tags; dates and places of files in Immich stay as they are")
     ap.add_argument("-f", "--force", action="store_true",
                     help="redo folders the log lists as verified, as a re-upload: --date/--place then apply to "
                          "every file, also those already in Immich, overwriting their date/place, without asking")
@@ -1638,7 +1645,7 @@ def preview(folder: Path, args, log: Log, api: Immich | None, media_ext, sidecar
         print(f"  Log: {row.get('Status')}, {row.get('Uploaded')} of {row.get('Files')} files uploaded by this "
               f"script, last run {row.get('Last run')}")
     skip = (row and row.get("Status") == "verified" and row.get("Files") == str(len(s.media))
-            and not (args.force or args.delete))
+            and not (args.force or args.recheck or args.delete))
     if api and s.media and not skip:
         in_immich(s.media, args, api)
     cands = [m for m in s.media if m.state != "failed"] if args.force else [m for m in s.media if m.state == "pending"]
@@ -1708,7 +1715,7 @@ def preview(folder: Path, args, log: Log, api: Immich | None, media_ext, sidecar
         first, last = taken[0], taken[-1]
         line += f", taken {first}" + (f" to {last[11:] if last[:10] == first[:10] else last}" if last != first else "")
     if skip:
-        print(line + "; skipped: verified in the log (--force to redo)")
+        print(line + "; skipped: verified in the log (--recheck to check it against Immich again)")
         return True
     existing = sum(m.state == "existing" for m in s.media)
     failed = [m for m in s.media if m.state == "failed"]

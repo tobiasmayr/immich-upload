@@ -50,6 +50,39 @@ def test_verified_folder_is_skipped_until_it_changes(run, immich, folder):
     assert "now 2: checking again" in out and "1 uploaded, 1 already in Immich" in out
 
 
+def test_recheck_uploads_what_immich_lost(run, immich, folder):
+    photo(folder, "a.jpg", "2019:07:14 15:30:00")
+    photo(folder, "b.jpg", "2019:07:14 16:00:00")
+    run(folder)
+    lost = immich.assets.pop(next(h for h, a in immich.assets.items() if a["name"] == "b.jpg"))
+    immich.album("Iceland")["ids"].discard(lost["id"])  # deleted in Immich, also from the album
+    rc, out = run(folder)
+    assert "Already uploaded and verified" in out and "--recheck" in out
+    rc, out = run(folder, "--recheck")
+    assert rc == 0 and "1 uploaded, 1 already in Immich" in out
+    assert len(immich.album("Iceland")["ids"]) == 2
+    assert "| verified |" in run.log.read_text()
+
+
+def test_recheck_leaves_dates_of_files_in_immich(run, immich, folder):
+    p = photo(folder, "scan.jpg")
+    run(folder, "--date", "1998-08")
+    immich.by_name("scan.jpg")["date"] = "2001-01-01T12:00:00.000Z"  # changed in Immich since
+    rc, out = run(folder, "--recheck", "--date", "1998-08")
+    assert rc == 0 and "0 uploaded, 1 already in Immich" in out
+    assert immich.by_name("scan.jpg")["date"] == "2001-01-01T12:00:00.000Z"
+
+
+def test_dry_run_recheck_asks_immich(run, immich, folder):
+    photo(folder, "a.jpg", "2019:07:14 15:30:00")
+    run(folder)
+    immich.assets.clear()
+    rc, out = run(folder, "-n")
+    assert "skipped: verified in the log" in out
+    rc, out = run(folder, "-n", "--recheck")
+    assert "skipped" not in out and "1 to upload" in out
+
+
 def test_files_in_immich_are_not_sent_again(run, immich, folder):
     p = photo(folder, "a.jpg", "2019:07:14 15:30:00")
     immich.add(p.read_bytes(), "a.jpg")
